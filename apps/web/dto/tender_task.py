@@ -1,0 +1,35 @@
+from datetime import date
+from typing import List
+
+from pydantic import BaseModel, Field
+
+
+class TenderTaskDto(BaseModel):
+    task_name: str = Field(..., description="任务名称")
+    task_type: int
+    file_ids: List[int]
+    tender_reference_id: int = None
+
+
+class BasePageDto(BaseModel):
+    page_offset: int = 1
+    page_size: int = 10
+
+
+class TenderConditionDto(BasePageDto):
+    task_type: int = None
+    process_status: str = None
+    created_at_start: date = None
+    created_at_end: date = None
+
+
+class TenderSimilarityDto(BasePageDto):
+    left_file_id: int = Field(..., description="左侧标书文件id")
+    right_file_id: int = Field(..., description="右侧标书文件id")
+
+
+class BatchIds(BaseModel):
+    ids: List[int]
+
+
+

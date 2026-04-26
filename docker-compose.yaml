@@ -1,0 +1,12 @@
+version: '2.2'
+
+services:
+  web-app:
+    container_name: tender-check
+    image: tender:v2.1
+    environment:
+      - TZ=Asia/Shanghai  # 设置时区
+    ports:
+      - "30018:8000"
+    volumes:
+      - ./:/app/tender
