@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
 from apps import AppContext
-from logger_config import get_logger
+from logger_config import get_logger, setup_logging
 
 logger = get_logger(name=__name__)
 
@@ -34,6 +34,7 @@ app.add_middleware(
 # 注册子路由（自动带全局前缀）
 if __name__ == "__main__":
     """启动 FastAPI 应用"""
+    setup_logging()
     logger.info("--------------tender 服务启动-------------------")
     uvicorn.run(
         "main:app",      # 模块:实例

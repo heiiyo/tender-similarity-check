@@ -62,7 +62,8 @@ class AppContext:
             mysql_conf["database_url"],
             pool_pre_ping=True,  # 自动重连
             pool_recycle=mysql_conf["pool_recycle"],  # 5分钟回收连接（防 MySQL 8h 超时）
-            echo=True  # 生产设为 False
+            echo=True,  # 生产设为 False
+
         )
         self.engine = engine
         # 创建会话工厂
@@ -117,7 +118,7 @@ class AppContext:
     def _init_embedding(self):
         from apps.model_action.llm import EmbeddingModel
         embedding_model_config = self.embedding_config
-        self.embedding_model = EmbeddingModel(url=embedding_model_config['llm_url'], model_name=embedding_model_config['llm_model_name'], api_key=embedding_model_config['api_key'])
+        self.embedding_model = EmbeddingModel(url=embedding_model_config['url'], model_name=embedding_model_config['model_name'], api_key=embedding_model_config['api_key'])
 
 
     def _init_llm(self):

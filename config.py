@@ -28,7 +28,6 @@ class YamlHandler:
             with open(file_path, "r", encoding=self.encoding) as f:
                 # 解析YAML（支持嵌套结构、中文、注释）
                 data = yaml.load(f, Loader=self.loader)
-            print(f"成功读取YAML文件：{file_path}")
             return data
         except yaml.YAMLError as e:
             print(f"YAML解析失败：{e}")

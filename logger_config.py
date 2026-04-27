@@ -53,10 +53,22 @@ LOGGING_CONFIG = {
     }
 }
 
+# --- 3. 初始化函数 (全局只调用一次) ---
+def setup_logging(level="INFO"):
+    """
+    在项目启动入口（如 main.py）调用此函数，仅执行一次。
+    """
+    # 获取 SQLAlchemy 的核心引擎 Logger
+    sqla_logger = logging.getLogger("sqlalchemy.engine")
 
-def get_logger(level="INFO", name=__package__):
-    # 应用配置
-    LOGGING_CONFIG["root"]["level"] = level
+    # 关键设置：禁止冒泡
+    # 这样 SQLAlchemy 的日志就不会传递给根 Logger，从而避免被你的全局配置再次处理
+    sqla_logger.propagate = False
+    LOGGING_CONFIG['root']['level'] = level
     logging.config.dictConfig(LOGGING_CONFIG)
+    print(f"✅ 日志系统已初始化，级别: {level}")
+
+
+def get_logger(name=__package__):
     logger = logging.getLogger(name)
     return logger
