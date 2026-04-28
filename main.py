@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
+from pathlib import Path
 from starlette.middleware.cors import CORSMiddleware
 
 from apps import AppContext
@@ -10,10 +11,14 @@ from logger_config import get_logger, setup_logging
 
 logger = get_logger(name=__name__)
 
+current_file = Path(__file__).resolve()
+# 获取项目跟路径
+current_dir = current_file.parent
 
 @asynccontextmanager
 async def start_app(app_context: FastAPI):
     AppContext.start(app_context)
+    AppContext.project_root = current_dir
     yield
 
 app = FastAPI(

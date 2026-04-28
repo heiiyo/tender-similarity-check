@@ -6,9 +6,9 @@ from pydantic import BaseModel, Field
 
 class TenderTaskDto(BaseModel):
     task_name: str = Field(..., description="任务名称")
-    task_type: int
-    file_ids: List[int]
-    tender_reference_id: int = None
+    task_type: int = Field(..., description="任务类型：1-查重，2-合规，3-综合")
+    file_ids: List[int] = Field(..., description="标书集合，标书文件id")
+    tender_reference_id: int = Field(..., description="招标文件id")
 
 
 class BasePageDto(BaseModel):

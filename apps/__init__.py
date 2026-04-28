@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from minio import Minio, S3Error
+from pathlib import Path
 from pymilvus import connections
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -9,6 +10,8 @@ from apps.tools.asyncio_tool import ConcurrencyManager
 class AppContext:
 
     _instance = None  # ← 类变量，存储唯一实例
+
+    project_root = Path(__file__).parent.parent
 
     def __new__(cls, app: FastAPI = None):
         if cls._instance is None:

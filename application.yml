@@ -1,13 +1,11 @@
 milvus:
   host: 127.0.0.1
   port: 19530
-  collection_name: tender_vector_collection
   vector_dim: 4096
   db_name: tender_check
   top_k: 10
 
 minio:
-  # .env
   host: 127.0.0.1:9000
   access_key: minioadmin
   secret_key: minioadmin
@@ -26,3 +24,10 @@ embedding:
   url: https://api.siliconflow.cn/v1/embeddings
   model_name: Qwen/Qwen3-Embedding-8B
   api_key: sk-sdbwgllpqhbnijbotgyqsikuhowhmmuzpowxraulvasfexsv
+
+mineru:
+  url: http://127.0.0.1:8001/file_parse
+
+file:
+  https:
+  http:
