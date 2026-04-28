@@ -5,10 +5,8 @@ from langchain_core.messages import HumanMessage
 from langchain_siliconflow import ChatSiliconFlow
 
 from agent.skill.skill import SkillRegistry
-from agent.tools.tender_base_tool import load_skill
+from agent.tools.tender_base_tool import load_skill, check_official_seal
 from agent.format.out_format import SkillInfoFormat
-
-from apps.model_action.vllm_service import extract_inner_json
 
 
 @pytest.fixture
@@ -27,6 +25,9 @@ def model():
         extra_body={"enable_thinking": False}
     )
 
+def test_check_official_seal():
+    result = check_official_seal(1)
+    print(result)
 
 def test_read_skills(skill_registry: SkillRegistry):
     assert 1 == len(skill_registry.skills)
