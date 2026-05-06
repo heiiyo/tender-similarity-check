@@ -25,6 +25,11 @@ embedding:
   model_name: Qwen/Qwen3-Embedding-8B
   api_key: sk-sdbwgllpqhbnijbotgyqsikuhowhmmuzpowxraulvasfexsv
 
+orc_model:
+  url: https://api.siliconflow.cn/v1/chat/completions
+  model_name: PaddlePaddle/PaddleOCR-VL-1.5
+  api_key: sk-sdbwgllpqhbnijbotgyqsikuhowhmmuzpowxraulvasfexsv
+
 mineru:
   url: http://127.0.0.1:8001/file_parse
 

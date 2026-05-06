@@ -61,19 +61,16 @@ class SkillRegistry:
                     meta = frontmatter.load(str(meta_file))
                     self.skills.append(SkillDetail(**meta.metadata, path=skill_folder))
 
-    def get_skill_catalog_prompt(self):
-        """生成给 LLM 的初始提示词：仅包含技能列表"""
-        catalog = """
-        根据用户问题匹配对对应的技能
-        Available Skills:
-        """
+    def get_skills_catalog_section(self) -> str:
+        """仅生成「标书技能」清单段落，供路由提示词拼接。"""
+        lines = ["【标书技能】（execution_mode=skill 时 skill_name 须与下列 name 完全一致）"]
         for skill in self.skills:
-            catalog += f"- {skill.name}: {skill.description}\n"
-        catalog += """
-        输出json案例：
-        {"skill_name": query_xxx, "bid_id"=1}
-        """
-        return catalog
+            lines.append(f"- {skill.name}: {skill.description}")
+        return "\n".join(lines)
+
+    def get_skill_catalog_prompt(self) -> str:
+        """兼容旧调用：仅含技能清单（不含系统工具）。新代码请使用 skill_runner.build_router_system_prompt。"""
+        return self.get_skills_catalog_section()
 
 
     def get_skill(self, skill_name: str) -> SkillDetail | None:
