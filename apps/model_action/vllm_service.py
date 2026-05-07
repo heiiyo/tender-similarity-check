@@ -7,10 +7,12 @@ from typing import Union, List, Dict, Any
 
 from sqlalchemy import and_
 
+from agent.format.out_format import SkillComplianceListFormat
+from agent.skill.skill_runner import run_skill_by_name
 from apps import AppContext
 from apps.repository.entity.file_entity import FileRecordEntity
 from apps.repository.entity.tender_entity import TenderPDFImageEntity, TenderComplianceRiskRecord, \
-    SubComplianceCheckTask
+    SubComplianceCheckTask, TenderRuleConfiguration
 from apps.tools.file_tool import read_md_file
 
 from pathlib import Path
@@ -113,88 +115,38 @@ class PromptTemplate:
         return template_mes
 
 
-async def handle_rule(rule, topic_list):
-    from apps.repository.minio_repository import get_file_url_http
-    llm_model = app_context.llm_model
-    sys_str = read_md_file(f"{parent_dir}/model_action/action/tender.md")
-    topic_name_list = [topic["tender_topic_name"] for topic in topic_list]
-    sys_str = sys_str.replace("{{topic_list}}", json.dumps(topic_name_list, ensure_ascii=False))
-    sys_message = SystemMessage(sys_str)
-    i_message = BaseMessage(rule.remake)
-    prompt_template = PromptTemplate([sys_message, i_message])
-    result = await llm_model.invoke(prompt_template)
-    topic_name_list = extract_inner_json(result["choices"][0]["message"]["content"])["result"]
-    print(f"规则匹配的一级目录列表:{topic_name_list}")
-    sub_compliance_check_task_id = None
-    bid_plagiarism_check_task_id = None
-    topic_ok_list = []
-    for topic in topic_list:
-        if topic["tender_topic_name"] in topic_name_list:
-            topic_ok_list.append(topic)
-    for topic in topic_ok_list:
-        logger.info(f"规则：{rule.name}；开始检测")
-        with app_context.db_session_factory() as session:
-            if not sub_compliance_check_task_id:
-                sub_compliance_task: SubComplianceCheckTask = session.query(SubComplianceCheckTask)\
-                    .filter(SubComplianceCheckTask.tender_file_id == topic["tender_file_id"]).first()
-                sub_compliance_check_task_id = sub_compliance_task.id
-                bid_plagiarism_check_task_id = sub_compliance_task.bid_plagiarism_check_task_id
-            images = session.query(TenderPDFImageEntity)\
-                .filter(and_(TenderPDFImageEntity.tender_file_id == topic["tender_file_id"],
-                         TenderPDFImageEntity.page_number >= topic["start_page"],
-                         TenderPDFImageEntity.page_number <= topic["end_page"])) \
-                .order_by(TenderPDFImageEntity.page_number.asc()).all()
-            file_ids = [image.file_id for image in images]
-            file_record_list = session.query(FileRecordEntity).filter(
-                FileRecordEntity.id.in_(file_ids)).all()
-            image_url_list = []
-            for file_record in file_record_list:
-                image_url_list.append({'url': get_file_url_http(file_record.file_path), 'file_id': file_record.id})
-            for i in range(0, len(image_url_list), 7):
-                current_batch = image_url_list[i: i + 7]
-                # 分批合规检测
-                answer = handel_compliance_check(current_batch, rule.remake)  # 结果
-                # 记录是否合规表内
-                if answer["answer"] == "no":
-                    answer_file_ids = answer["file_id"]
-                    if answer_file_ids and len(answer_file_ids) > 0:
-                        for file_id in answer_file_ids:
-                            image_entity: TenderPDFImageEntity = session.query(TenderPDFImageEntity) \
-                                .filter(TenderPDFImageEntity.file_id == file_id).first()
-                            # 如果找不到对应的图片，直接定位到该章节的首页
-                            if not image_entity:
-                                image_entity = images[0]
-                            session.add(TenderComplianceRiskRecord(
-                                sub_compliance_check_task_id=sub_compliance_check_task_id,
-                                bid_plagiarism_check_task_id=bid_plagiarism_check_task_id,
-                                tender_file_id=topic["tender_file_id"],
-                                risk_description=f"{answer['description']}",
-                                tender_page=image_entity.page_number,
-                                rule_id=rule.id
-                            ))
-                            session.commit()
-                    else:
-                        image_entity = images[0]
-                        session.add(TenderComplianceRiskRecord(
-                            sub_compliance_check_task_id=sub_compliance_check_task_id,
-                            bid_plagiarism_check_task_id=bid_plagiarism_check_task_id,
-                            tender_file_id=topic["tender_file_id"],
-                            risk_description=f"{answer['description']}",
-                            tender_page=image_entity.page_number,
-                            rule_id=rule.id
-                        ))
-                        session.commit()
-                else:
-                    session.add(TenderComplianceRiskRecord(
-                        sub_compliance_check_task_id=sub_compliance_check_task_id,
-                        bid_plagiarism_check_task_id=bid_plagiarism_check_task_id,
-                        tender_file_id=topic["tender_file_id"],
-                        risk_description=f"{answer['description']}",
-                        tender_page=images[0].page_number,
-                        rule_id=rule.id,
-                        is_risk=0
-                    ))
-                    session.commit()
+async def handle_rule(rule: TenderRuleConfiguration,
+                      tender_file_id,
+                      sub_compliance_check_task_id: int,
+                      bid_plagiarism_check_task_id: int):
+    # 使用skill检查规则
+    result: SkillComplianceListFormat = run_skill_by_name(
+        app_context.agent_model,
+        rule.skill,
+        instruction_params={"bid_id": tender_file_id},
+    )
+    # 将结果写入数据库
+    with app_context.db_session_factory() as session:
+        risk_records = []
+        for item in result.items:
+            # is_compliant为False表示有风险（is_risk=1），为True表示无风险（is_risk=0）
+            is_risk = 0 if item.is_compliant else 1
+            
+            risk_record = TenderComplianceRiskRecord(
+                sub_compliance_check_task_id=sub_compliance_check_task_id,
+                tender_file_id=tender_file_id,
+                bid_plagiarism_check_task_id=bid_plagiarism_check_task_id,
+                risk_description=item.check_basis,
+                is_risk=is_risk,
+                rule_id=rule.id
+            )
+            risk_records.append(risk_record)
+        
+        if risk_records:
+            session.add_all(risk_records)
+            session.commit()
+    
+    return result
 
 
 async def handel_topic(image_url_list):
@@ -279,7 +231,7 @@ def extract_inner_json(response_text):
             # 如果还是失败，可能是括号不匹配严重，打印日志辅助调试
             logger.error(f"无法提取有效 JSON 数据，候选片段前 100 字:\n{candidate[:100]}")
 
-    raise ValueError(f"解析失败，已尝试多种策略，原始内容:\n{clean_text[:500]}...")
+    raise ValueError(f"解析失败，已尝试多种策略")
 
 
 

@@ -19,6 +19,11 @@ llm_model:
   llm_url: https://api.siliconflow.cn/v1/chat/completions
   llm_model_name: Qwen/Qwen3.6-35B-A3B
   api_key: sk-sdbwgllpqhbnijbotgyqsikuhowhmmuzpowxraulvasfexsv
+  temperature: 0
+  max_tokens: 1000
+  timeout: 30
+  extra_body:
+    enable_thinking: False
 
 embedding:
   url: https://api.siliconflow.cn/v1/embeddings

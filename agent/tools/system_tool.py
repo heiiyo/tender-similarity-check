@@ -157,9 +157,13 @@ def _file_under_skill_dir(skill_dir: Path, relative: str) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def _resolve_skill_reference_file(skill_name: str, reference_path: str) -> Path | str:
+def _resolve_skill_reference_file(skill_name: str, reference_path: str) -> dict | str:
     """
-    根据 skill_name 找到 skills/<name>/，再匹配参考文件得到绝对路径。
+    根据 skill_name 找到技能目录，再匹配参考文件。
+    支持本地和 MinIO 两种来源：
+    - 本地：返回文件绝对路径 Path 对象
+    - MinIO：返回包含内容的字典 {"source": "minio", "content": str, "path": str}
+    
     reference_path 为相对路径时依次尝试：技能根目录、references/、ref/ 下同名文件。
     """
     name = (skill_name or "").strip()
@@ -169,17 +173,28 @@ def _resolve_skill_reference_file(skill_name: str, reference_path: str) -> Path 
     if not ref_input:
         return "错误: reference_path 不能为空"
 
+    detail = SkillContent.get_skill(name)
+    if detail is None:
+        return f"错误: 未知技能 '{name}'，请使用 skills 目录下已有的技能名"
+
+    # 处理绝对路径（仅适用于本地文件系统）
     p_in = Path(ref_input)
-    if p_in.is_absolute():
+    if p_in.is_absolute() and detail.source == "local":
         p = p_in.resolve()
         if not p.is_file():
             return f"错误: 绝对路径不是有效文件 - {ref_input}"
         return p
 
-    detail = SkillContent.get_skill(name)
-    if detail is None:
-        return f"错误: 未知技能 '{name}'，请使用 skills 目录下已有的技能名"
+    # 根据技能来源分别处理
+    if detail.source == "minio":
+        return _resolve_minio_reference(detail, ref_input)
+    else:
+        # 默认按本地处理
+        return _resolve_local_reference(detail, ref_input)
 
+
+def _resolve_local_reference(detail, ref_input: str) -> Path | str:
+    """解析本地技能的参考文件路径"""
     skill_dir = Path(detail.path).resolve()
     if not skill_dir.is_dir():
         return f"错误: 技能目录不存在 - {skill_dir}"
@@ -195,28 +210,81 @@ def _resolve_skill_reference_file(skill_name: str, reference_path: str) -> Path 
         str(skill_dir / "ref" / ref_input),
     ]
     return (
-        f"错误: 在技能 [{name}] 下未找到参考文件 '{ref_input}'。"
+        f"错误: 在技能 [{detail.name}] 下未找到参考文件 '{ref_input}'。"
         f" 已尝试路径: {tried}"
     )
+
+
+def _resolve_minio_reference(detail, ref_input: str) -> dict | str:
+    """从 MinIO 解析并下载技能的参考文件内容"""
+    try:
+        from apps import AppContext
+        app_ctx = AppContext()
+        minio_client = app_ctx.minio_client
+        bucket_name = app_ctx.minio_config.get("bucket_name", "skills-bucket")
+        
+        # MinIO 中的技能路径格式：skills/<skill_name>/<reference_path>
+        skill_prefix = f"skills/{detail.name}/"
+        
+        # 尝试不同的相对路径组合
+        candidate_paths = [
+            f"{skill_prefix}{ref_input}",
+            f"{skill_prefix}references/{ref_input}",
+            f"{skill_prefix}ref/{ref_input}",
+        ]
+        
+        for object_path in candidate_paths:
+            try:
+                # 检查对象是否存在并下载
+                response = minio_client.get_object(bucket_name, object_path)
+                content_bytes = response.read()
+                response.close()
+                response.release_conn()
+                
+                # 尝试 UTF-8 解码，失败则尝试 GBK
+                try:
+                    content = content_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    content = content_bytes.decode("gbk")
+                
+                return {
+                    "source": "minio",
+                    "content": content,
+                    "path": object_path,
+                    "skill_name": detail.name
+                }
+            except Exception:
+                # 如果这个路径不存在，尝试下一个
+                continue
+        
+        return (
+            f"错误: 在 MinIO 技能 [{detail.name}] 下未找到参考文件 '{ref_input}'。"
+            f" 已尝试路径: {candidate_paths}"
+        )
+        
+    except ImportError:
+        return "错误: MinIO 客户端未安装，无法加载远程技能参考文件"
+    except Exception as e:
+        return f"错误: 从 MinIO 加载参考文件失败 - {str(e)}"
 
 
 @tool
 def sys_load_references_tool(skill_name: str, reference_path: str):
     """
     根据技能名解析参考文件的绝对路径并读取文本内容。
-    先匹配技能目录 project/skills/<skill_name>/，再将 reference_path 解析为该目录下的文件：
-    支持相对路径（如 notes.md、references/foo.txt）；若为绝对路径则在校验为文件后直接读取。
-
-    :param skill_name: skills 目录下的技能文件夹名，与 SKILL.md 中 name 一致。
-    :param reference_path: 相对技能目录的参考文件路径，或已有文件的绝对路径。
+    支持从不同来源（如本地 skills 目录）获取技能定义，并根据 reference_path 定位文件：
+    1. 若 reference_path 为绝对路径，直接校验并读取。
+    2. 若为相对路径，则在技能根目录、references/、ref/ 子目录下查找。
+    
+    :param skill_name: 技能名称，用于定位技能目录（如 skills/<skill_name>/）。
+    :param reference_path: 参考文件的路径。可以是相对于技能目录的路径，也可以是绝对路径。
     """
     try:
         resolved = _resolve_skill_reference_file(skill_name, reference_path)
         if isinstance(resolved, str):
+            # 如果返回的是字符串，说明是错误信息
             return resolved
-
         content = _read_text_file(resolved)
-        print(f"sys_load_references_tool: {content}")
         return f"文件: {resolved}\n\n文件内容:\n{content}"
     except OSError as e:
         return f"错误: 读取文件失败 - {str(e)}"

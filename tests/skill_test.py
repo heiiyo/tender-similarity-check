@@ -4,10 +4,11 @@ from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
 from langchain_siliconflow import ChatSiliconFlow
 
-from agent.format.out_format import SkillInfoFormat
+from agent.format.out_format import SkillComplianceListFormat, SkillInfoFormat
 from agent.skill.skill import SkillRegistry
 from agent.skill.skill_runner import (
     build_router_system_prompt,
+    extract_skill_compliance_items,
     invoke_with_skill_or_llm,
     route_user_request,
     run_skill_by_name,
@@ -88,7 +89,11 @@ def test_check_signature(skill_registry: SkillRegistry, model):
     )
     assert skill_info.execution_mode == "skill"
     task_result = run_skill_by_name(model, skill_info.skill_name)
-    print(task_result["messages"][-1].content)
+    batch = task_result["structured_response"]
+    assert isinstance(batch, SkillComplianceListFormat)
+    items = extract_skill_compliance_items(task_result)
+    assert len(items) >= 1
+    print(items[0].is_compliant, items[0].check_basis)
 
 
 def test_check_official_seal(skill_registry: SkillRegistry, model):
@@ -97,7 +102,11 @@ def test_check_official_seal(skill_registry: SkillRegistry, model):
     )
     assert skill_info.execution_mode == "skill"
     task_result = run_skill_by_name(model, skill_info.skill_name)
-    print(task_result["messages"][-1].content)
+    batch = task_result["structured_response"]
+    assert isinstance(batch, SkillComplianceListFormat)
+    items = extract_skill_compliance_items(task_result)
+    assert len(items) >= 1
+    print(items[0].is_compliant, items[0].check_basis)
 
 
 def test_invoke_routes_general_without_skill(skill_registry: SkillRegistry, model):
@@ -115,4 +124,6 @@ def test_invoke_routes_skill_when_matched(skill_registry: SkillRegistry, model):
     )
     assert out["mode"] == "skill"
     assert out["router"].execution_mode == "skill"
-    assert out["invoke_result"]["messages"]
+    assert isinstance(
+        out["invoke_result"]["structured_response"], SkillComplianceListFormat
+    )

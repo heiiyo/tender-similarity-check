@@ -2,29 +2,37 @@
 用户请求编排：路由模型在「标书技能 / 系统工具 / 纯模型」间选择；
 命中技能则 load_skill；命中系统工具则挂载对应工具与用户原问题交互。
 """
-from typing import Any
+import re
+from typing import Any, Mapping
 
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
 
-from agent.format.out_format import SkillInfoFormat
+from agent.format.out_format import (
+    SkillComplianceFormat,
+    SkillComplianceListFormat,
+    SkillInfoFormat,
+)
 from agent.skill.skill import SkillRegistry
 from agent.tools.system_tool import format_system_tools_catalog, system_tools_by_name, get_registered_system_tools
 from agent.tools.tender_base_tool import load_skill
 
 SKILL_EXECUTOR_SYSTEM_PROMPT = """
 你是一个执行引擎，不是聊天机器人。
-你的任务是分析用户请求并立即调用工具。
+你的任务是按 SKILL 手册完成必要步骤，需要事实时必须调用工具。
 
 【重要禁令】
 1. 禁止在回复中描述你的思考过程（例如：不要说“让我来调用工具”、“我正在查找”）。
-2. 禁止在回复中模拟工具调用的结果。
-3. 如果你需要调用工具，必须直接输出工具调用指令，不要有任何前置文本。
+2. 禁止在未调用工具的情况下，臆造工具才会给出的检测结果。
+3. 需要查询或检测时，必须实际调用工具并取得返回后再下结论。
 
 【执行规则】
-- 如果用户的问题需要查询数据，必须直接调用工具。
-- 不要告诉我你要做什么，直接做！"""
+- 凡依赖标书数据、公章/签字/关键词等检测的，必须先调用相应工具。
+- 流程结束后，你必须产出结构化字段 `items`：数组，每项含 is_compliant、check_basis。
+- 单项结论时 `items` 仅含一条即可；多页/多项须分项列出多条。
+- 每条 check_basis 须紧扣工具返回（页码、字段、是否命中等），不得臆造。
+"""
 
 SYSTEM_TOOLS_EXECUTOR_SYSTEM_PROMPT = """
 你是系统任务执行引擎。用户问题已路由到「系统工具」能力。
@@ -70,7 +78,6 @@ def route_user_request(
         tools=get_registered_system_tools()
     )
     result = main_agent.invoke({"messages": [HumanMessage(user_message)]})
-    print("route_user_request:", result)
     structured = result["structured_response"]
     if not isinstance(structured, SkillInfoFormat):
         raise TypeError("路由模型未返回 SkillInfoFormat")
@@ -91,14 +98,58 @@ def resolve_system_tools_from_router(router: SkillInfoFormat) -> list[BaseTool]:
     return out
 
 
-def run_skill_by_name(model: Any, skill_name: str) -> dict:
-    """按技能名加载 tools 与 SKILL 指令并执行一轮。"""
-    tools, instructions = load_skill(skill_name)
-    print(f"run_skill_by_name: {tools}, {instructions}")
-    skill_agent = create_agent(
-        model, tools=tools, system_prompt=SKILL_EXECUTOR_SYSTEM_PROMPT
+def apply_instruction_params(
+    instructions: str, params: Mapping[str, Any] | None
+) -> str:
+    """
+    用 params 补全 SKILL 手册中的占位符。占位符与 skills 中常见写法一致：`{{key}}`（如 {{query}}、{{file_id}}）。
+    未出现在 params 中的占位符保持原样，便于发现缺参。
+    """
+
+    if not params:
+        return instructions
+
+    def _replace(m: re.Match) -> str:
+        key = m.group(1).strip()
+        if key in params:
+            return str(params[key])
+        return m.group(0)
+
+    return re.sub(r"\{\{\s*([^}]+?)\s*\}\}", _replace, instructions)
+
+
+def extract_skill_compliance_items(invoke_result: dict) -> list[SkillComplianceFormat]:
+    """从 ``run_skill_by_name`` 的 invoke 结果中取出合规条目列表。"""
+    sr = invoke_result.get("structured_response")
+    if isinstance(sr, SkillComplianceListFormat):
+        return list(sr.items)
+    if isinstance(sr, SkillComplianceFormat):
+        return [sr]
+    raise TypeError(
+        "structured_response 应为 SkillComplianceListFormat 或 SkillComplianceFormat，"
+        f"实际为 {type(sr).__name__}"
     )
-    return skill_agent.invoke({"messages": [HumanMessage(instructions)]})
+
+
+def run_skill_by_name(
+    model: Any,
+    skill_name: str,
+    instruction_params: Mapping[str, Any] | None = None
+):
+    """按技能名加载 tools 与 SKILL 指令执行一轮；结构化结果为 ``SkillComplianceListFormat``（items 数组）。
+
+    instruction_params: 用于替换手册正文中的 `{{key}}` 占位符，例如
+    ``{"query": "审计报表", "file_id": 1}`` 对应 ``{{query}}``、``{{file_id}}``。
+    """
+    tools, instructions = load_skill(skill_name)
+    final_instructions = apply_instruction_params(instructions, instruction_params)
+    skill_agent = create_agent(
+        model,
+        tools=tools,
+        system_prompt=SKILL_EXECUTOR_SYSTEM_PROMPT,
+        response_format=SkillComplianceListFormat,
+    )
+    return skill_agent.invoke({"messages": [HumanMessage(content=final_instructions)]})
 
 
 def run_system_tools_agent(model: Any, user_message: str, tools: list[BaseTool]) -> dict:
@@ -113,9 +164,13 @@ def invoke_with_skill_or_llm(
     skill_registry: SkillRegistry,
     model: Any,
     user_message: str,
+    *,
+    instruction_params: Mapping[str, Any] | None = None,
 ) -> dict:
     """
     自动路由：标书技能 → 系统工具 → 纯模型。
+
+    instruction_params: 当路由为 skill 时，传入 ``run_skill_by_name`` 用于补全 SKILL 中 ``{{key}}`` 占位符。
 
     返回:
         mode: 'skill' | 'system_tools' | 'general'
@@ -130,7 +185,9 @@ def invoke_with_skill_or_llm(
             return {
                 "mode": "skill",
                 "router": router,
-                "invoke_result": run_skill_by_name(model, name),
+                "invoke_result": run_skill_by_name(
+                    model, name, instruction_params=instruction_params
+                ),
             }
         return _invoke_general_only(model, user_message, router)
 

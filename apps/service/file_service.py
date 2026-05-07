@@ -105,34 +105,52 @@ def upload_file(files, business_id)->List[int]:
     """
     file_record_list = []
     for file in files:
-        if business_id == "tender" and file.filename.endswith(".zip"):
-            file_record_list.append(zip_unzip(file, business_id))
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            file_path = os.path.join(tmp_dir, file.filename)
-            with open(file_path, "wb") as f:
-                f.write(file.file.read())
-            p = Path(file_path)
-            # 上传到 MinIO / 保存到数据库 / OCR 扫描等
-            uuid_str = uuid.uuid4().hex
-            file_type = p.suffix[1:] if p.suffix else ""
-            minio_client.fput_object(
-                bucket_name=app_context.minio_config["bucket_name"],
-                object_name=f"files/{business_id}/{uuid_str+'.'+ file_type}",
-                file_path=file_path,  # ✅ 直接传入 file.file
-                content_type=file.content_type
-            )
-            file_record_list.append(FileRecordEntity(
-                file_size=p.stat().st_size,
-                mime_type=p.suffix[1:] if p.suffix else "",
-                file_name=file.filename,
-                file_path=f"files/{business_id}/{uuid_str+'.'+ file_type}",
-                business_id=business_id,
-            ))
-    with app_context.db_session_factory() as session:
-        session.add_all(file_record_list)
-        session.commit()
-        file_ids = [file_record.id for file_record in file_record_list]
+        # 如果 business_id 为 skill，则只允许 zip 压缩包，并解压上传
+        if business_id == "skills":
+            if not file.filename.endswith(".zip"):
+                # 可选：抛出异常或记录日志，这里选择跳过非 zip 文件
+                continue
+            # 调用 zip_unzip 处理解压和上传，注意 zip_unzip 返回的是 list，需要 extend
+            extracted_records = zip_unzip(file, business_id)
+            file_record_list.extend(extracted_records)
+        else:
+            # 原有逻辑：如果是 tender 且为 zip，也进行解压处理
+            if business_id == "tender" and file.filename.endswith(".zip"):
+                extracted_records = zip_unzip(file, business_id)
+                file_record_list.extend(extracted_records)
+            else:
+                # 普通文件上传逻辑
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    file_path = os.path.join(tmp_dir, file.filename)
+                    with open(file_path, "wb") as f:
+                        f.write(file.file.read())
+                    p = Path(file_path)
+                    # 上传到 MinIO / 保存到数据库 / OCR 扫描等
+                    uuid_str = uuid.uuid4().hex
+                    file_type = p.suffix[1:] if p.suffix else ""
+                    minio_client.fput_object(
+                        bucket_name=app_context.minio_config["bucket_name"],
+                        object_name=f"files/{business_id}/{uuid_str}.{file_type}",
+                        file_path=file_path,
+                        content_type=file.content_type
+                    )
+                    file_record_list.append(FileRecordEntity(
+                        file_size=p.stat().st_size,
+                        mime_type=file_type,
+                        file_name=file.filename,
+                        file_path=f"files/{business_id}/{uuid_str}.{file_type}",
+                        business_id=business_id,
+                    ))
+    
+    # 批量保存数据库记录
+    if file_record_list:
+        with app_context.db_session_factory() as session:
+            session.add_all(file_record_list)
+            session.commit()
+            file_ids = [record.id for record in file_record_list]
+    else:
+        file_ids = []
+        
     return file_ids
 
 

@@ -54,6 +54,7 @@ class AppContext:
         self._init_minio()
         self._init_llm()
         self._init_embedding()
+        self._init_agent_model()
 
     def _init_mysql(self):
         """
@@ -128,3 +129,15 @@ class AppContext:
         from apps.model_action.llm import LLMModel
         llm_model_config = self.llm_model_config
         self.llm_model = LLMModel(url=llm_model_config['llm_url'], model_name=llm_model_config['llm_model_name'], api_key=llm_model_config['api_key'])
+
+    def _init_agent_model(self):
+        from langchain_siliconflow import ChatSiliconFlow
+        llm_model_config = self.llm_model_config
+        self.agent_model = ChatSiliconFlow(
+                                    base_url=llm_model_config['llm_url'],
+                                    model=llm_model_config['llm_model_name'],
+                                    api_key=llm_model_config['api_key'],
+                                    temperature=llm_model_config['temperature'],
+                                    max_tokens=llm_model_config['max_tokens'],
+                                    timeout=llm_model_config['timeout'],
+                                    extra_body=llm_model_config['extra_body'])

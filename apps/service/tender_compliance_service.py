@@ -162,13 +162,6 @@ def compliance_background_task(tender_file_id, task_id):
             sub_compliance_old.risk_number = risk_number
             session.add(sub_compliance_old)
             session.commit()
-    # except Exception as e:
-    #     with app_context.db_session_factory() as session:
-    #         if sub_compliance_id:
-    #             sub_compliance_old: SubComplianceCheckTask = session.get(SubComplianceCheckTask, sub_compliance_id)
-    #             sub_compliance_old.process_status = "failed"
-    #             session.add(sub_compliance_old)
-    #             session.commit()
 
 
 def query_tender_compliance_list(task_id, page_dto: BasePageDto):
@@ -254,26 +247,32 @@ async def compliance_validation(tender_file_id):
     if not tender_topic_list or len(tender_topic_list) < 1:
         result = await parser_tender_topic(tender_file_id)
         documents = parser_document(tender_file_id)
-        topic_list = insert_into_milvus(tender_file_id, result, documents)
+        insert_into_milvus(tender_file_id, result, documents)
     else:
         topic_list = [{"topic_content": topic_info.topic_name, "start_page": topic_info.start_page,
                        "end_page": topic_info.end_page, "tender_file_id": tender_file_id} for topic_info in tender_topic_list]
+    
+    # 获取子任务信息以获取 sub_compliance_check_task_id 和 bid_plagiarism_check_task_id
+    with app_context.db_session_factory() as session:
+        sub_compliance_task = session.query(SubComplianceCheckTask).filter(
+            SubComplianceCheckTask.tender_file_id == tender_file_id
+        ).order_by(SubComplianceCheckTask.id.desc()).first()
+        
+        if not sub_compliance_task:
+            logger.error(f"未找到标书 {tender_file_id} 的合规子任务")
+            return
+        
+        sub_compliance_check_task_id = sub_compliance_task.id
+        bid_plagiarism_check_task_id = sub_compliance_task.bid_plagiarism_check_task_id
+    
     # 获取所有已启动的合规规则库
     with app_context.db_session_factory() as session:
         rule_list = session.query(TenderRuleConfiguration).filter(TenderRuleConfiguration.status == 1).all()
-    # 根据规则库匹配到对应的一级目录，以及对应的那几页（也就是对应的图片）
-    topic_list_d = []
-    for topic in topic_list:
-        topic_list_d.append(json.loads(TenderTopicInfo(
-            tender_file_id=tender_file_id,
-            tender_topic_name=topic['topic_content'],
-            start_page=topic['start_page'],
-            end_page=topic['end_page']
-        ).to_json()))
+    
     asyncio_task = []
     if rule_list:
         for rule in rule_list:
-            asyncio_task.append(handle_rule(rule, topic_list_d))
+            asyncio_task.append(handle_rule(rule, tender_file_id, sub_compliance_check_task_id, bid_plagiarism_check_task_id))
     await asyncio.gather(*asyncio_task)
 
 

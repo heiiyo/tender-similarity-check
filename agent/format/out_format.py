@@ -30,3 +30,29 @@ class SkillInfoFormat(BaseModel):
         default="",
         description="简述为何选择该 execution_mode；general 时说明用户意图类别即可。",
     )
+
+
+class SkillComplianceFormat(BaseModel):
+    """技能执行完成后的合规判定（结构化输出）。"""
+
+    is_compliant: bool = Field(
+        description="综合 SKILL 要求与工具返回事实，结论是否合规：true=合规，false=不合规或存在缺陷。",
+    )
+    check_basis: str = Field(
+        description=(
+            "检查依据：说明依据哪些工具结果、数据字段、页码或规则作出上述判定；"
+            "须与工具返回一致，不得臆造。"
+        ),
+    )
+
+
+class SkillComplianceListFormat(BaseModel):
+    """技能执行后的多条合规结论（分页、分项或多检查点时使用）。"""
+
+    items: list[SkillComplianceFormat] = Field(
+        description=(
+            "合规判定条目列表，每项结构与 SkillComplianceFormat 相同。"
+            "单项检测可只含一条；多页/多项须分项列出多条，便于追溯。"
+        ),
+    )
+
