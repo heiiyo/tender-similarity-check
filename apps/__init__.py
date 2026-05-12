@@ -7,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 
 from apps.tools.asyncio_tool import ConcurrencyManager
 
+
 class AppContext:
 
     _instance = None  # ← 类变量，存储唯一实例
@@ -28,7 +29,8 @@ class AppContext:
         app_context.app.include_router(tender_compliance_api.tender_compliance_router)
 
     def init_context(self):
-        from config import data_config, milvus_config, minio_config, mysql_config, llm_model_config, embedding_config
+        from config import (data_config, milvus_config, minio_config,
+                            mysql_config, llm_model_config, embedding_config, mineru_config)
         if self.app:
             self.app.state.app_context = self
             self.app.state.app_config = data_config
@@ -43,6 +45,7 @@ class AppContext:
         self.mysql_config = mysql_config
         self.llm_model_config = llm_model_config
         self.embedding_config = embedding_config
+        self.mineru_config = mineru_config
         self._init()
         return self
 
@@ -54,6 +57,7 @@ class AppContext:
         self._init_minio()
         self._init_llm()
         self._init_embedding()
+        self._init_agent_model()
 
     def _init_mysql(self):
         """
@@ -128,3 +132,16 @@ class AppContext:
         from apps.model_action.llm import LLMModel
         llm_model_config = self.llm_model_config
         self.llm_model = LLMModel(url=llm_model_config['llm_url'], model_name=llm_model_config['llm_model_name'], api_key=llm_model_config['api_key'])
+
+    def _init_agent_model(self):
+        from langchain_siliconflow import ChatSiliconFlow
+        llm_model_config = self.llm_model_config
+        self.agent_model = ChatSiliconFlow(
+                                    base_url=llm_model_config['llm_url'],
+                                    model=llm_model_config['llm_model_name'],
+                                    api_key=llm_model_config['api_key'],
+                                    temperature=llm_model_config['temperature'],
+                                    max_tokens=llm_model_config['max_tokens'],
+                                    timeout=llm_model_config['timeout'],
+                                    extra_body=llm_model_config['extra_body'])
+        print(self.agent_model.model_dump_json())

@@ -17,8 +17,6 @@ WORKDIR $WORKDIR
 # 安装系统依赖：OCR工具（Tesseract+简体中文包+poppler）+ 编译环境（支持sklearn/PyTorch）
 # Debian专属apt-get命令，--no-install-recommends 精简依赖，最后清理缓存减小体积
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tesseract-ocr \
-    tesseract-ocr-chi-sim \
     poppler-utils \
     gcc \
     g++ \

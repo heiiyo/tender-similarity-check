@@ -31,3 +31,16 @@ def delete_object(file_path: str):
     :return:
     """
     minio_client.remove_object(app_context.minio_config['bucket_name'], file_path)
+
+def get_object_bytes(file_path: str):
+    """
+    获取文件字节流
+    :param file_path: 文件在minio的路径
+    :return: 文件的字节内容
+    """
+    response = minio_client.get_object(app_context.minio_config['bucket_name'], file_path)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()

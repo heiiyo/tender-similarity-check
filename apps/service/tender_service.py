@@ -18,14 +18,14 @@ from apps.document_parser.markdown_parser import MarkDownParser
 from apps.document_parser.pdf_parser import PdfParser
 from apps.repository.entity.file_entity import FileRecordEntity
 from apps.repository.entity.tender_entity import BidPlagiarismCheckTask, SubBidPlagiarismCheckTask, \
-    DocumentSimilarityRecord
+    DocumentSimilarityRecord, SubComplianceCheckTask, TenderComplianceRiskRecord
 from apps.repository.minio_repository import get_file_url, delete_object
 from apps.service.milnus_service import create_tender_vector_milvus_db, create_tender_reference_vector_milvus_db, \
     create_tender_topic_vector_milvus_db, create_rm_text_vector_milvus_db, create_main_topic_vector_milvus_db
 from apps.service.tender_compliance_service import create_compliance_check_task, parser_tender_topic, parser_document, \
     insert_into_milvus
 from apps.web.dto.tender_task import TenderTaskDto, TenderConditionDto, BasePageDto, TenderSimilarityDto
-from apps.web.vo.similarity_respose import TenderTaskPage, format_datetime, TenderSimilarityVO, FileRecordVO
+from apps.web.vo.similarity_respose import TenderTaskPage, format_datetime, TenderSimilarityVO, FileRecordVO, TaskDataVO
 
 from logger_config import get_logger
 
@@ -117,7 +117,7 @@ def bid_plagiarism_check(tender_task_dto: TenderTaskDto, background_tasks: Backg
     :return:
     """
     # 解析标书文件
-    background_tasks.add_task(tender_file_parser, tender_task_dto.file_ids)
+    # background_tasks.add_task(tender_file_parser, tender_task_dto.file_ids)
     if tender_task_dto.task_type == 1:
         # 创建标书任务
         tender_file_list, task_id = create_plagiarism_check_tasks(tender_task_dto)
@@ -141,10 +141,10 @@ async def tender_file_parser(tender_file_ids):
         md_parser = MarkDownParser()
         # 标书转化为图片
         await md_parser.to_images(tender_file_id=tender_file_id)
-        # 解析标题
-        topics = await parser_tender_topic(tender_file_id)
         # 解析文件内容
         documents = parser_document(tender_file_id)
+        # 解析标题
+        topics = await parser_tender_topic(tender_file_id)
         insert_into_milvus(tender_file_id, topics, documents)
 
 
@@ -211,13 +211,59 @@ def get_tender_task_list(condition: TenderConditionDto):
     with app_context.db_session_factory() as session:
         tasks = session.query(BidPlagiarismCheckTask).filter(and_(*condition_array)).offset(offset).limit(per_page).all()
         count = session.query(BidPlagiarismCheckTask).filter(and_(*condition_array)).count()
-        task_data = [{
-            "id": task.id,
-            "check_type": task.check_type,
-            "task_name": task.task_name,
-            "file_name_list": task.file_name_list,
-            "process_status": task.process_status,
-            "created_at": format_datetime(task.created_at)} for task in tasks]
+        task_data = []
+        for task in tasks:
+            check_num = 0
+            risk_num = 0
+            compliance_num = 0
+            similarity_num = 0
+
+            if task.check_type == 1:
+                # 查重任务：查询 SubBidPlagiarismCheckTask 表
+                sub_tasks = session.query(SubBidPlagiarismCheckTask).filter(
+                    SubBidPlagiarismCheckTask.bid_plagiarism_check_task_id == task.id
+                ).all()
+
+                # 检测项数量 = 子任务数量
+                check_num = len(sub_tasks)
+                # 重复项数量 = 所有子任务的 similarity_number 总和
+                similarity_num = sum(sub_task.similarity_number for sub_task in sub_tasks)
+
+            elif task.check_type == 2:
+                # 合规任务：查询 SubComplianceCheckTask 和 TenderComplianceRiskRecord 表
+                sub_tasks = session.query(SubComplianceCheckTask).filter(
+                    SubComplianceCheckTask.bid_plagiarism_check_task_id == task.id
+                ).all()
+
+                # 获取所有子任务ID
+                sub_task_ids = [sub_task.id for sub_task in sub_tasks]
+
+                if sub_task_ids:
+                    # 查询所有合规风险记录
+                    risk_records = session.query(TenderComplianceRiskRecord).filter(
+                        TenderComplianceRiskRecord.sub_compliance_check_task_id.in_(sub_task_ids)
+                    ).all()
+
+                    # 检测项数量 = 所有记录的总数
+                    check_num = len(risk_records)
+                    # 合规项数量 = is_compliant == 1 的记录数
+                    compliance_num = sum(1 for record in risk_records if record.is_compliant == 1)
+                    # 风险项数量 = is_compliant == 0 的记录数
+                    risk_num = sum(1 for record in risk_records if record.is_compliant == 0)
+
+            task_data.append(TaskDataVO(
+                id=task.id,
+                check_type=task.check_type,
+                task_type=task.task_type,
+                task_name=task.task_name,
+                file_name_list=task.file_name_list,
+                check_num=check_num,
+                risk_num=risk_num,
+                compliance_num=compliance_num,
+                similarity_num=similarity_num,
+                process_status=task.process_status,
+                created_at=format_datetime(task.created_at)
+            ))
     page = TenderTaskPage(
         page_offset=condition.page_offset,
         page_size=len(task_data),

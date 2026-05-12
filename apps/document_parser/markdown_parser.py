@@ -3,8 +3,10 @@ import sys
 from collections import defaultdict
 from typing import List
 
+from apps import AppContext
 from apps.document_parser.base import HFiledocument, HDocument
 from apps.document_parser.base_parser import BaseParser
+from apps.repository.entity.tender_entity import TenderPDFImageEntity
 
 
 class MarkDownParser(BaseParser):
@@ -88,7 +90,7 @@ class MarkDownParser(BaseParser):
 
         return documents
 
-    def parse(self, filename=None, stream=None, file_id=None) -> HFiledocument:
+    def parse(self, filename=None, stream=None, file_id=None) -> HFiledocument | None:
         """
         文档解析器功能，将文件中的内容转化为可读字符串
 
@@ -105,12 +107,12 @@ class MarkDownParser(BaseParser):
                 text, images, content_list = self._mineru266(data_stream=stream)
             else:
                 return None
-            # return self._handle_mineru_data(content_list, file_id)
-            return self._handle_mineru_data_test(content_list, file_id)
+            # 帮我讲text存储到数据库中，并返回给用户，
+            return self._handle_mineru_data(content_list, file_id)
         except Exception as e:
             raise ValueError(f"标书PDF解析失败：{str(e)}")
 
-    def _handle_mineru_data(self, content_list, file_id) -> HFiledocument:
+    def _handle_mineru_data_test(self, content_list, file_id) -> HFiledocument:
         """
         处理mineru返回数据
         :param content_list:
@@ -157,7 +159,7 @@ class MarkDownParser(BaseParser):
         return root_document
 
 
-    def _handle_mineru_data_test(self, content_list, file_id) -> HFiledocument:
+    def _handle_mineru_data(self, content_list, file_id) -> HFiledocument:
         """
         处理mineru返回数据
         :param content_list:
@@ -168,6 +170,10 @@ class MarkDownParser(BaseParser):
         grouped = defaultdict(list)
         for content in content_list:
             grouped[content['page_idx']].append(content)
+        
+        # 收集需要更新的页面数据
+        page_updates = []
+        
         for page_idx, item_list in grouped.items():
             text = ""
             for item in item_list:
@@ -181,6 +187,15 @@ class MarkDownParser(BaseParser):
                 text += content_text
             if text:
                 text = text.rstrip('\n\r')
+                
+                # 收集页面数据用于后续批量更新数据库
+                page_number = page_idx + 1  # page_idx 从 0 开始，页码从 1 开始
+                page_updates.append({
+                    "tender_file_id": file_id,
+                    "page_number": page_number,
+                    "page_context": text
+                })
+                
                 if root_document:
                     next_doc = HFiledocument(file_id, page_idx + 1, text)
                     last_document.next = next_doc
@@ -188,8 +203,44 @@ class MarkDownParser(BaseParser):
                 else:
                     root_document = HFiledocument(file_id, page_idx + 1, text)
                     last_document: HFiledocument = root_document
-                # FileSaver.save_text(f"documents/{file_id}/{page_idx}.txt", text)
+        
+        # 批量更新数据库中的 page_context 字段
+        if page_updates:
+            self._update_page_context_batch(page_updates)
         return root_document
+
+
+    def _update_page_context_batch(self, page_updates: list[dict]):
+        """
+        批量更新 TenderPDFImageEntity 表的 page_context 字段
+        :param page_updates: 包含 tender_file_id, page_number, page_context 的字典列表
+        """
+        try:
+            app_ctx = AppContext()
+            with app_ctx.db_session_factory() as session:
+                for update_data in page_updates:
+                    tender_file_id = update_data["tender_file_id"]
+                    page_number = update_data["page_number"]
+                    page_context = update_data["page_context"]
+                    # 查询对应的记录
+                    record = session.query(TenderPDFImageEntity).filter(
+                        TenderPDFImageEntity.tender_file_id == tender_file_id,
+                        TenderPDFImageEntity.page_number == page_number
+                    ).first()
+                    
+                    if record:
+                        # 更新 page_context 字段
+                        record.page_context = page_context
+                    else:
+                        # 如果记录不存在，可以选择创建新记录或跳过
+                        # 这里选择跳过，因为图片记录应该已经存在
+                        pass
+                
+                # 提交所有更新
+                session.commit()
+        except Exception as e:
+            # 记录错误但不中断主流程
+            print(f"更新页面内容到数据库失败: {str(e)}")
 
     def clean_text(self, text: str) -> str:
         """
