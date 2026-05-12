@@ -247,17 +247,9 @@ class BaseParser(ABC):
     # 调用接口处理PDF文件
     def _mineru266(self, file_path=None, data_stream=None):
         text = ""
-        url = "http://127.0.0.1:8001/file_parse"
-        data = {
-            'server_url': 'http://vllm-server:8000',
-            "backend": "vlm-http-client",
-            "table_enable": True,
-            "parse_method": "auto",
-            "lang_list": "ch",
-            "return_images": True,
-            "return_middle_json": True,
-            "return_content_list": True
-        }
+        mineru_config = AppContext().mineru_config
+        url = mineru_config['url']
+        data = mineru_config['data']
         if file_path:
             with open(file_path, "rb") as f:
                 files = {"files": f}

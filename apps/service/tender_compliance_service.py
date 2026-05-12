@@ -1,17 +1,22 @@
 import asyncio
 import json
 import re
+import shutil
+import time
 from io import BytesIO
 from typing import List
 
+from anyio import Path
 from fastapi import BackgroundTasks
+from langchain.agents import create_agent
+from langchain_core.messages import HumanMessage
 from sqlalchemy.sql.operators import and_
 
+from agent.format.out_format import TopicListFormat
 from apps import AppContext
 from apps.algorithms.embedding import QwenEmbeddingVectorizer
 from apps.document_parser.base import HFiledocument, HDocument
 from apps.document_parser.markdown_parser import MarkDownParser
-from apps.model_action.tender_model_vo import TenderTopicInfo
 from apps.model_action.vllm_service import handle_rule, handel_topic
 from apps.repository.entity.file_entity import FileRecordEntity
 from apps.repository.entity.tender_entity import TenderPDFImageEntity, TenderTopic, TenderRuleConfiguration, \
@@ -20,8 +25,8 @@ from apps.repository.minio_repository import get_file_url_http, get_file_url
 from apps.service.milnus_service import create_tender_topic_vector_milvus_db, create_tender_vector_milvus_db
 from apps.web.dto.compliance_dto import TenderComplianceDTO, ComplianceRulesConditionDTO, ComplianceInfoConditionDto
 from apps.web.dto.tender_task import BasePageDto, TenderTaskDto
-from apps.web.vo.compliance_respose import ComplianceRulesPage, ComplianceRulesVO, ComplianceInfoPage, \
-    TenderComplianceInfoVO, ComplianceInfoVO
+from apps.web.vo.compliance_respose import ComplianceRulesPage, ComplianceRulesVO, \
+    TenderComplianceInfoVO, ComplianceInfoVO, SkillComplianceFormat
 from apps.web.vo.similarity_respose import TenderTaskPage, FileRecordVO
 
 from logger_config import get_logger
@@ -41,20 +46,72 @@ def calculate_pages_int(total, per_page=10):
         return 0
     return (total + per_page - 1) // per_page
 
+
+def get_compliance_rule_by_id(rule_id: int):
+    """
+    根据规则ID查询单个规则详情
+    :param rule_id: 规则ID
+    :return: 规则详情VO，如果不存在则返回None
+    """
+    with app_context.db_session_factory() as session:
+        rule = session.get(TenderRuleConfiguration, rule_id)
+        if not rule:
+            return None
+
+        return ComplianceRulesVO(
+            id=rule.id,
+            rule_name=rule.rule_name,
+            rule_description=rule.rule_description,
+            skill_name=rule.skill_name,
+            status=rule.status,
+            rule_type=rule.rule_type,
+            sort_order=rule.sort_order
+        )
+
+
+def query_all_compliance_rules():
+    """
+    获取所有合规规则列表（不分页，按sort_order倒序）
+    :return: 规则列表
+    """
+    result_data = []
+    with app_context.db_session_factory() as session:
+        # 查询所有规则，按sort_order倒序排列
+        rules = session.query(TenderRuleConfiguration).filter(TenderRuleConfiguration.is_deleted == 0).order_by(
+            TenderRuleConfiguration.sort_order.desc()
+        ).all()
+        
+        for rule in rules:
+            result_data.append(
+                ComplianceRulesVO(
+                    id=rule.id,
+                    rule_name=rule.rule_name,
+                    rule_description=rule.rule_description,
+                    skill_name=rule.skill_name,
+                    status=rule.status,
+                    rule_type=rule.rule_type,
+                    sort_order=rule.sort_order
+                )
+            )
+    
+    return result_data
+
+
 def add_compliance_rule(tender_compliance: TenderComplianceDTO):
     """
     添加合规规则
     :param tender_compliance: 规则信息
-    :return:
     """
+    sort_order_value = tender_compliance.sort_order if tender_compliance.sort_order is not None else int(time.time())
     # 获取所有已启动的合规规则库
     with app_context.db_session_factory() as session:
         session.add(TenderRuleConfiguration(
-            name=tender_compliance.rule_name,
-            remake=tender_compliance.rule_description,
-            topic=tender_compliance.rule_topic,
-            skill=tender_compliance.md,
-            status=tender_compliance.status
+            rule_name=tender_compliance.rule_name,
+            rule_description=tender_compliance.rule_description,
+            skill_name=tender_compliance.skill_name,
+            status=tender_compliance.status,
+            rule_type=tender_compliance.rule_type,
+            sort_order=sort_order_value
         ))
         session.commit()
 
@@ -63,19 +120,80 @@ def update_compliance_rule_info(tender_compliance: TenderComplianceDTO):
     rule_id = None
     with app_context.db_session_factory() as session:
         rule: TenderRuleConfiguration = session.get(TenderRuleConfiguration, tender_compliance.id)
+        if not rule:
+            return None
+
         if tender_compliance.rule_name:
-            rule.name = tender_compliance.rule_name
+            rule.rule_name = tender_compliance.rule_name
         if tender_compliance.rule_description:
-            rule.remake = tender_compliance.rule_description
-        if tender_compliance.rule_topic:
-            rule.topic = tender_compliance.rule_topic
-        if tender_compliance.md:
-            rule.skill = tender_compliance.md
-        rule.status = tender_compliance.status
+            rule.rule_description = tender_compliance.rule_description
+        if tender_compliance.skill_name is not None:
+            rule.skill_name = tender_compliance.skill_name
+        if tender_compliance.status is not None:
+            rule.status = tender_compliance.status
+        if tender_compliance.rule_type is not None:
+            rule.rule_type = tender_compliance.rule_type
+        if tender_compliance.sort_order is not None:
+            rule.sort_order = tender_compliance.sort_order
+
         session.add(rule)
         session.commit()
         rule_id = rule.id
     return rule_id
+
+def delete_compliance_rule_by_id(rule_id: int):
+    """
+    删除合规规则（逻辑删除，设置 is_deleted 为 True）
+    :param rule_id: 合规规则ID
+    """
+    with app_context.db_session_factory() as session:
+        rule = session.get(TenderRuleConfiguration, rule_id)
+        if not rule:
+            return False
+        
+        # 假设 TenderRuleConfiguration 实体中有 is_deleted 字段
+        # 如果实体中没有该字段，请确保在数据库模型中添加 is_deleted 列
+        if hasattr(rule, 'is_deleted'):
+            rule.is_deleted = True
+        else:
+            # 如果没有 is_deleted 字段，这里可能需要根据实际模型调整
+            # 通常逻辑删除会修改状态或删除记录，这里按照指令使用 is_deleted
+            logger.warning(f"TenderRuleConfiguration 实体中未找到 is_deleted 字段，无法执行逻辑删除")
+            return False
+            
+        session.add(rule)
+        session.commit()
+        return True
+
+
+def delete_skill_by_name(skill_name: str):
+    """
+    根据 skill_name 删除 skills 目录下对应的 skill 文件夹
+    :param skill_name: 技能名称
+    :return: 删除结果字典
+    """
+    if not skill_name:
+        return {"success": False, "message": "技能名称不能为空"}
+
+    # 假设 skills 目录位于项目根目录或特定配置路径下
+    # 这里使用相对路径 'skills'，实际项目中可能需要根据配置调整
+    skills_dir = Path("skills")
+    skill_path = skills_dir / skill_name
+
+    try:
+        # 检查路径是否存在且是一个目录
+        if not (skill_path.exists() and skill_path.is_dir()):
+            logger.warning(f"技能文件夹不存在或不是目录: {skill_path}")
+            return {"success": False, "message": f"技能文件夹 '{skill_name}' 不存在"}
+
+        # 删除文件夹及其内容
+        shutil.rmtree(skill_path)
+        logger.info(f"成功删除技能文件夹: {skill_path}")
+        return {"success": True, "message": f"技能文件夹 '{skill_name}' 已删除"}
+
+    except Exception as e:
+        logger.error(f"删除技能文件夹 '{skill_name}' 时发生错误: {str(e)}", exc_info=True)
+        return {"success": False, "message": f"删除失败: {str(e)}"}
 
 
 def query_compliance_rules_list(rules_condition_dto: ComplianceRulesConditionDTO):
@@ -85,22 +203,32 @@ def query_compliance_rules_list(rules_condition_dto: ComplianceRulesConditionDTO
     offset = (page - 1) * per_page
     condition_array = []
     result_data = []
+    condition_array.append(TenderRuleConfiguration.is_deleted == 0)
     # 筛选任务类型
     if rules_condition_dto.rule_name:
-        condition_array.append(TenderRuleConfiguration.name == rules_condition_dto.rule_name)
+        condition_array.append(TenderRuleConfiguration.rule_name == rules_condition_dto.rule_name)
+    if rules_condition_dto.status:
+        condition_array.append(TenderRuleConfiguration.status == rules_condition_dto.status)
+    if rules_condition_dto.rule_type:
+        condition_array.append(TenderRuleConfiguration.rule_type == rules_condition_dto.rule_type)
     with app_context.db_session_factory() as session:
-        if condition_array and len(condition_array) == 1:
-            rules = session.query(TenderRuleConfiguration).filter(*condition_array).offset(offset).limit(
+        if condition_array and len(condition_array) >= 1:
+            rules = session.query(TenderRuleConfiguration).filter(*condition_array).order_by(TenderRuleConfiguration.sort_order.desc()).offset(offset).limit(
                 per_page).all()
             count = session.query(TenderRuleConfiguration).filter(*condition_array).count()
         else:
-            rules = session.query(TenderRuleConfiguration).offset(offset).limit(
+            rules = session.query(TenderRuleConfiguration).order_by(TenderRuleConfiguration.sort_order.desc()).offset(offset).limit(
                 per_page).all()
             count = session.query(TenderRuleConfiguration).count()
         for rule in rules:
             result_data.append(
-                ComplianceRulesVO(id=rule.id, rule_name=rule.name,
-                              rule_description=rule.remake, status=rule.status))
+                ComplianceRulesVO(id=rule.id,
+                                  rule_name=rule.rule_name,
+                                  rule_description=rule.rule_description,
+                                  skill_name=rule.skill_name,
+                                  status=rule.status,
+                                  rule_type=rule.rule_type,
+                                  sort_order=rule.sort_order))
     page = ComplianceRulesPage(
         page_offset=rules_condition_dto.page_offset,
         page_size=len(result_data),
@@ -124,6 +252,7 @@ def create_compliance_check_task(tender_task_dto: TenderTaskDto, background_task
                 task_name=tender_task_dto.task_name,
                 file_name_list=",".join(file_name_list),
                 file_id_list=','.join(map(str, file_id_list)),
+                task_type=tender_task_dto.task_type,
                 tender_reference_file_id=tender_task_dto.tender_reference_id
             )
             session.add(task)
@@ -135,7 +264,6 @@ def create_compliance_check_task(tender_task_dto: TenderTaskDto, background_task
 
 
 def compliance_background_task(tender_file_id, task_id):
-    # try:
     with app_context.db_session_factory() as session:
         file_record = session.get(FileRecordEntity, tender_file_id)
         if not file_record:
@@ -191,24 +319,24 @@ def query_tender_compliance_list(task_id, page_dto: BasePageDto):
 
 
 def query_tender_compliance_info(compliance_info_condition: ComplianceInfoConditionDto):
-    page = compliance_info_condition.page_offset  # 当前页码（从 1 开始）
-    per_page = compliance_info_condition.page_size  # 每页记录数
-    # 计算偏移量
-    offset = (page - 1) * per_page
+    from collections import defaultdict
     compliance_info_data = []
     with app_context.db_session_factory() as session:
+        # 获取所有风险记录
         record_list = session.query(TenderComplianceRiskRecord).filter(
-            TenderComplianceRiskRecord.tender_file_id == compliance_info_condition.tender_id).offset(offset).limit(per_page).all()
-        count = session.query(TenderComplianceRiskRecord).filter(
-            TenderComplianceRiskRecord.tender_file_id == compliance_info_condition.tender_id).count()
-        risk_number = session.query(TenderComplianceRiskRecord)\
-            .filter(and_(TenderComplianceRiskRecord.tender_file_id == compliance_info_condition.tender_id, TenderComplianceRiskRecord.is_risk == 1))\
+            TenderComplianceRiskRecord.tender_file_id == compliance_info_condition.tender_id).all()
+        risk_number = session.query(TenderComplianceRiskRecord) \
+            .filter(and_(TenderComplianceRiskRecord.tender_file_id == compliance_info_condition.tender_id,
+                         TenderComplianceRiskRecord.is_compliant == 1)) \
             .count()
-        passed_number = session.query(TenderComplianceRiskRecord)\
-            .filter(and_(TenderComplianceRiskRecord.tender_file_id == compliance_info_condition.tender_id, TenderComplianceRiskRecord.is_risk == 0))\
+        passed_number = session.query(TenderComplianceRiskRecord) \
+            .filter(and_(TenderComplianceRiskRecord.tender_file_id == compliance_info_condition.tender_id,
+                         TenderComplianceRiskRecord.is_compliant == 0)) \
             .count()
+
         sub_task_list = session.query(SubComplianceCheckTask).filter(
             SubComplianceCheckTask.tender_file_id == compliance_info_condition.tender_id).all()
+
         file_record_top: FileRecordEntity = session.get(FileRecordEntity, compliance_info_condition.tender_id)
         file_record_list = []
         for sub_task in sub_task_list:
@@ -216,79 +344,218 @@ def query_tender_compliance_info(compliance_info_condition: ComplianceInfoCondit
             file_record = FileRecordVO(id=file_record_entity.id, file_name=file_record_entity.file_name,
                                        file_url=get_file_url(file_record_entity.file_path))
             file_record_list.append(file_record)
+
+        # 按 rule_id 分组
+        records_by_rule = defaultdict(list)
         for record in record_list:
-            compliance_info = ComplianceInfoVO(info_id=record.id,
-                                            info_description=record.risk_description,
-                                            file_page_number=record.tender_page,
-                                            info_type=1-record.is_risk)
+            if record.rule_id is not None:
+                records_by_rule[record.rule_id].append(record)
+
+        # 获取所有涉及的 rule_id
+        rule_ids = list(records_by_rule.keys())
+
+        # 批量查询规则信息
+        rules_dict = {}
+        if rule_ids:
+            rules = session.query(TenderRuleConfiguration).filter(
+                TenderRuleConfiguration.id.in_(rule_ids)
+            ).all()
+            for rule in rules:
+                rules_dict[rule.id] = rule
+
+        # 组装数据
+        for rule_id, records in records_by_rule.items():
+            rule = rules_dict.get(rule_id)
+            if not rule:
+                logger.warning(f"未找到规则 ID: {rule_id}")
+                continue
+
+            # 构建该规则下的所有检测结果
+            compliance_list = []
+            for record in records:
+                compliance_item = SkillComplianceFormat(
+                    is_compliant=(record.is_compliant == 0),  # is_compliant=0 表示合规
+                    page_number=record.page_number if record.page_number else 0,
+                    check_basis=record.check_basis if record.check_basis else ""
+                )
+                compliance_list.append(compliance_item)
+
+            # 构建规则维度的合规信息
+            compliance_info = ComplianceInfoVO(
+                rule_id=rule_id,
+                rule_name=rule.rule_name if rule else "",
+                rule_description=rule.rule_description if rule else "",
+                compliance_list=compliance_list
+            )
             compliance_info_data.append(compliance_info)
-    com_page = ComplianceInfoPage(data=compliance_info_data, page_size=len(record_list), page_num=calculate_pages_int(count, per_page),
-                                  page_offset=compliance_info_condition.page_offset, total=count)
-    page = TenderComplianceInfoVO(data=com_page,
-                                  tender_id=file_record_top.id,
-                                  tender_name=file_record_top.file_name,
-                                  tender_url=get_file_url(file_record_top.file_path),
-                                  risk_number=risk_number,
-                                  passed_number=passed_number,
-                                  tender_list=file_record_list)
+
+    # 注意：这里不再使用分页，因为已经按规则分组
+    page = TenderComplianceInfoVO(
+        data=compliance_info_data,
+        tender_id=file_record_top.id,
+        tender_name=file_record_top.file_name,
+        tender_url=get_file_url(file_record_top.file_path),
+        risk_number=risk_number,
+        passed_number=passed_number,
+        tender_list=file_record_list
+    )
     return page
 
 
-async def compliance_validation(tender_file_id):
-    # 标书处理分析，将标书每一页转化为相应的图片
-    md_parser = MarkDownParser()
+def update_compliance_rule_sort_order(sort_list: List[dict]):
+    """
+    批量更新规则排序
+    :param sort_list: 排序列表，每个元素包含 id 和 sort_order
+    """
     with app_context.db_session_factory() as session:
-        images = session.query(TenderPDFImageEntity).filter(TenderPDFImageEntity.tender_file_id == tender_file_id).all()
-    if not images or len(images) < 1:
-        await md_parser.to_images(tender_file_id=tender_file_id)
-    # 根据获取标书中的一级目录
-    with app_context.db_session_factory() as session:
-        tender_topic_list = session.query(TenderTopic).filter(TenderTopic.tender_file_id == tender_file_id).all()
-    if not tender_topic_list or len(tender_topic_list) < 1:
-        result = await parser_tender_topic(tender_file_id)
-        documents = parser_document(tender_file_id)
-        insert_into_milvus(tender_file_id, result, documents)
-    else:
-        topic_list = [{"topic_content": topic_info.topic_name, "start_page": topic_info.start_page,
-                       "end_page": topic_info.end_page, "tender_file_id": tender_file_id} for topic_info in tender_topic_list]
-    
-    # 获取子任务信息以获取 sub_compliance_check_task_id 和 bid_plagiarism_check_task_id
-    with app_context.db_session_factory() as session:
-        sub_compliance_task = session.query(SubComplianceCheckTask).filter(
-            SubComplianceCheckTask.tender_file_id == tender_file_id
-        ).order_by(SubComplianceCheckTask.id.desc()).first()
+        for item in sort_list:
+            rule_id = item.get('id')
+            sort_order = item.get('sort_order')
+            
+            if rule_id is not None and sort_order is not None:
+                rule = session.get(TenderRuleConfiguration, rule_id)
+                if rule:
+                    rule.sort_order = sort_order
         
-        if not sub_compliance_task:
-            logger.error(f"未找到标书 {tender_file_id} 的合规子任务")
+        session.commit()
+
+
+async def compliance_validation(tender_file_id):
+    """
+    合规性验证主流程
+    """
+    try:
+        # 1. 获取子任务和主任务信息（前置校验，失败则快速返回）
+        with app_context.db_session_factory() as session:
+            sub_compliance_task = session.query(SubComplianceCheckTask).filter(
+                SubComplianceCheckTask.tender_file_id == tender_file_id
+            ).order_by(SubComplianceCheckTask.id.desc()).first()
+            
+            if not sub_compliance_task:
+                logger.error(f"未找到标书 {tender_file_id} 的合规子任务")
+                return
+            
+            sub_compliance_check_task_id = sub_compliance_task.id
+            bid_plagiarism_check_task_id = sub_compliance_task.bid_plagiarism_check_task_id
+            
+            # 获取主任务信息以获取 task_type
+            main_task = session.query(BidPlagiarismCheckTask).filter(
+                BidPlagiarismCheckTask.id == bid_plagiarism_check_task_id
+            ).first()
+            
+            if not main_task:
+                logger.error(f"未找到主任务 {bid_plagiarism_check_task_id}")
+                return
+            
+            task_type = main_task.task_type
+        
+        # 2. 并行检查并处理图片和目录
+        md_parser = MarkDownParser()
+        
+        # 检查是否需要生成图片
+        with app_context.db_session_factory() as session:
+            has_images = session.query(TenderPDFImageEntity).filter(
+                TenderPDFImageEntity.tender_file_id == tender_file_id
+            ).first() is not None
+        
+        # 检查是否需要解析目录
+        with app_context.db_session_factory() as session:
+            has_topics = session.query(TenderTopic).filter(
+                TenderTopic.tender_file_id == tender_file_id
+            ).first() is not None
+        
+        # 构建并行任务列表
+        parallel_tasks = []
+        
+        # 任务1：生成图片（如果需要）
+        if not has_images:
+            parallel_tasks.append(md_parser.to_images(tender_file_id=tender_file_id))
+            logger.info(f"标书 {tender_file_id} 开始生成图片")
+        
+        # 任务2：解析目录并入库（如果需要）
+        if not has_topics:
+            async def parse_and_index():
+                """解析目录并建立向量索引"""
+                result = await parser_tender_topic(tender_file_id)
+                documents = parser_document(tender_file_id)
+                insert_into_milvus(tender_file_id, result, documents)
+            
+            parallel_tasks.append(parse_and_index())
+            logger.info(f"标书 {tender_file_id} 开始解析目录")
+        
+        # 并行执行独立任务
+        if parallel_tasks:
+            await asyncio.gather(*parallel_tasks, return_exceptions=True)
+        
+        # 3. 根据任务类型获取匹配的合规规则库
+        with app_context.db_session_factory() as session:
+            # 根据 task_type 匹配 rule_type
+            query = session.query(TenderRuleConfiguration).filter(
+                TenderRuleConfiguration.status == 1
+            )
+            
+            # 如果 task_type 有值，则添加 rule_type 过滤条件
+            if task_type is not None:
+                query = query.filter(and_(TenderRuleConfiguration.rule_type == task_type, TenderRuleConfiguration.rule_type ==1))
+                logger.info(f"标书 {tender_file_id} 使用任务类型 {task_type} 匹配规则")
+            else:
+                logger.warning(f"标书 {tender_file_id} 的任务类型为 None，将获取所有启用的规则")
+            
+            rule_list = query.all()
+        
+        if not rule_list:
+            logger.warning(f"标书 {tender_file_id} 没有可用的合规规则（任务类型: {task_type}）")
             return
         
-        sub_compliance_check_task_id = sub_compliance_task.id
-        bid_plagiarism_check_task_id = sub_compliance_task.bid_plagiarism_check_task_id
+        # 4. 并行执行所有规则检查
+        logger.info(f"标书 {tender_file_id} 开始执行 {len(rule_list)} 个合规规则检查")
+        asyncio_task = [
+            handle_rule(rule, tender_file_id,
+                        sub_compliance_check_task_id,
+                        bid_plagiarism_check_task_id)
+            for rule in rule_list
+        ]
+        
+        # 使用 gather 并行执行，并捕获异常避免单个规则失败影响整体
+        await asyncio.gather(*asyncio_task, return_exceptions=True)
+        
+        logger.info(f"标书 {tender_file_id} 合规验证完成")
     
-    # 获取所有已启动的合规规则库
-    with app_context.db_session_factory() as session:
-        rule_list = session.query(TenderRuleConfiguration).filter(TenderRuleConfiguration.status == 1).all()
-    
-    asyncio_task = []
-    if rule_list:
-        for rule in rule_list:
-            asyncio_task.append(handle_rule(rule, tender_file_id, sub_compliance_check_task_id, bid_plagiarism_check_task_id))
-    await asyncio.gather(*asyncio_task)
+    except Exception as e:
+        logger.error(f"标书 {tender_file_id} 合规验证异常: {str(e)}", exc_info=True)
+        raise
 
 
 async def parser_tender_topic(tender_file_id):
     with app_context.db_session_factory() as session:
-        # 获取标书前五页图片数据
         tender_pdf_image_list = session.query(TenderPDFImageEntity)\
-            .filter(and_(TenderPDFImageEntity.tender_file_id == tender_file_id, and_(TenderPDFImageEntity.page_number > 1, TenderPDFImageEntity.page_number < 8)))\
+            .filter(and_(TenderPDFImageEntity.tender_file_id == tender_file_id, and_(TenderPDFImageEntity.page_number > 1, TenderPDFImageEntity.page_number < 10)))\
             .order_by(TenderPDFImageEntity.page_number.asc()).all()
-        image_file_list = [image.file_id for image in tender_pdf_image_list]
-        url_list = []
-        for image_id in image_file_list:
-            file_item: FileRecordEntity = session.get(FileRecordEntity, image_id)
-            image_url = get_file_url_http(file_item.file_path)
-            url_list.append({'url': image_url})
-        return await handel_topic(url_list)
+        context = ""
+        for image in tender_pdf_image_list:
+            context += image.page_context
+        agent_model = AppContext().agent_model
+        agent = create_agent(
+            agent_model,
+            system_prompt='''
+            # Role
+            你是一名文档目录审核专家，用于提取文档目录内容
+            
+            # Context
+            根据输入内容分析出文档的一级目录
+            
+            # Few-Shot Examples
+            ## Example 1 (符合要求)
+            Input: 帮我分析出内容中的一级目录。
+            Output: {'topics': [{'topic_name':'投标函'},{'topic_name':'投标保证金'}]}    
+            ''',
+            response_format=TopicListFormat,
+        )
+
+        response = await agent.ainvoke({"messages": [HumanMessage(context)]})
+        topic_formatted: TopicListFormat = response['structured_response']
+        topic_list = [topic.topic_name for topic in topic_formatted.topics]
+        return topic_list
 
 
 def parser_document(tender_file_id):

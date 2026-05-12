@@ -8,6 +8,7 @@ from typing import List
 
 import requests
 
+from apps import AppContext
 from apps.algorithms.embedding import QwenEmbeddingVectorizer
 from apps.document_parser.base import HFiledocument
 from apps.document_parser.base_parser import HDocument
@@ -17,10 +18,7 @@ from apps.document_parser.pdf_parser_test import PdfParserTest
 from apps.document_parser.text_parser import TextParser
 from apps.service.milnus_service import create_tender_vector_milvus_db
 from apps.splitting import overlapping_splitting
-# 13 14
-# 15 16
-from apps.tools.file_tool import concurrent_upload, FileSaver
-from tests import AppContext
+
 
 
 def text_parser():
@@ -109,7 +107,8 @@ def md_parser_test():
 # 调用接口处理PDF文件
 def mineru266(file_path=None, data_stream=None):
     text = ""
-    url = "http://127.0.0.1:8001/file_parse"
+    mineru_config = AppContext().mineru_config
+    url = mineru_config['url']
     data = {
         'server_url': 'http://vllm-server:8000',
         "backend": "vlm-http-client",
@@ -139,52 +138,3 @@ def mineru266(file_path=None, data_stream=None):
             images = item["results"][k1]["images"]
             content_list = item["results"][k1]["content_list"]
         return text, images, json.loads(content_list)
-
-
-if __name__ == "__main__":
-    # pdf_parser()
-    md_parser_test()
-    #file_path1 = "D:/heiiyo/tender-similarity-check/tests/text/xxxxxxxxxxxxxxxxxxxxxxxxxxxx.pdf"
-    # AppContext().init_context()
-    # file_path2 = "D:/heiiyo/tender-similarity-check/tests/text/xxxxxxxxxxxxxxxxxxxxxxxxxxx.pdf"
-    # md_parser = MarkDownParser()
-    # print(f"开始执行:{datetime.datetime.now()}")
-    asyncio.run(md_parser.to_images(file_path=file_path2))
-    # # ids = await md_parser.to_images(file_path=file_path2)
-    # print(f"执行完成:{datetime.datetime.now()}")
-    # pattern = r"^[\u4e00-\u9fa5]+、.*"
-    # text, images, content_list = mineru266(file_path1)
-    # root_document: HFiledocument = None
-    # last_document: HFiledocument = root_document
-    # print(f"结果：{result}")
-    # page = {}
-    # grouped = defaultdict(list)
-    # for content in content_list:
-    #     grouped[content['page_idx']].append(content)
-    # for page_idx, item_list in grouped.items():
-    #     text = ""
-    #     for item in item_list:
-    #         content_type = item["type"]
-    #         content_text = ""
-    #         content_text_level = item.get("text_level", 0)
-    #         if content_type == "text":
-    #             if content_text_level == 1 and re.match(pattern, item['text']):
-    #                 content_text += f"# {item['text']}\n"
-    #             else:
-    #                 content_text += f"{item['text']}\n"
-    #         if content_type == "list" and item["sub_type"] == "text":
-    #             for sub_item in item["list_items"]:
-    #                 content_text += f"{sub_item}\n"
-    #         text += content_text
-    #
-    #     if text:
-    #         text = text.rstrip('\n\r')
-    #         if root_document:
-    #             last_document.next = HFiledocument(1, page_idx+1, text)
-    #         else:
-    #             root_document = HFiledocument(1, page_idx+1, text)
-    #             last_document: HFiledocument = root_document
-    #         FileSaver.save_text(f"documents/ENOVIA/{page_idx}.txt", text)
-    # print("执行完成")
-    # query_milvus_data()
-    # text_parser()

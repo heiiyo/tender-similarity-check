@@ -38,6 +38,7 @@ class SkillComplianceFormat(BaseModel):
     is_compliant: bool = Field(
         description="综合 SKILL 要求与工具返回事实，结论是否合规：true=合规，false=不合规或存在缺陷。",
     )
+    page_number: int = Field(description="标书对应的页码")
     check_basis: str = Field(
         description=(
             "检查依据：说明依据哪些工具结果、数据字段、页码或规则作出上述判定；"
@@ -53,6 +54,22 @@ class SkillComplianceListFormat(BaseModel):
         description=(
             "合规判定条目列表，每项结构与 SkillComplianceFormat 相同。"
             "单项检测可只含一条；多页/多项须分项列出多条，便于追溯。"
+        ),
+    )
+
+class TopicFormat(BaseModel):
+    """一级目录信息"""
+    topic_name:str = Field(
+        description="一级目录名称",
+    )
+
+
+class TopicListFormat(BaseModel):
+    """一级目录信息"""
+
+    topics: list[TopicFormat] = Field(
+        description=(
+            "目录集合"
         ),
     )
 

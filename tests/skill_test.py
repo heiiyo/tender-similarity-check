@@ -1,4 +1,5 @@
 import pytest
+import asyncio
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
@@ -15,6 +16,10 @@ from agent.skill.skill_runner import (
 )
 from agent.tools.tender_base_tool import check_official_seal, check_tender_signature
 
+@pytest.fixture
+def context():
+    from apps import AppContext
+    return AppContext().init_context()
 
 @pytest.fixture
 def skill_registry():
@@ -81,14 +86,14 @@ def test_check_tender_signature_tool():
     assert len(result) == 1
 
 
-def test_check_signature(skill_registry: SkillRegistry, model):
+def test_check_signature(context, skill_registry: SkillRegistry, model):
     skill_info = route_user_request(
         skill_registry,
         model,
-        "帮我查询标书bid_id=1是否有法人代表或委托人签字",
+        "帮我查询标书bid_id=1是否有盖公司公章",
     )
     assert skill_info.execution_mode == "skill"
-    task_result = run_skill_by_name(model, skill_info.skill_name)
+    task_result = run_skill_by_name(model, skill_info.skill_name, instruction_params={"bid_id":1})
     batch = task_result["structured_response"]
     assert isinstance(batch, SkillComplianceListFormat)
     items = extract_skill_compliance_items(task_result)
@@ -118,12 +123,42 @@ def test_invoke_routes_general_without_skill(skill_registry: SkillRegistry, mode
     assert out["invoke_result"]["messages"]
 
 
-def test_invoke_routes_skill_when_matched(skill_registry: SkillRegistry, model):
-    out = invoke_with_skill_or_llm(
-        skill_registry, model, "检测标书bid_id=1是否盖有公章"
+@pytest.mark.asyncio
+async def test_invoke_routes_skill_when_matched(context, skill_registry: SkillRegistry, model):
+    """测试技能路由和执行的完整流程，确保协程完全执行"""
+    
+    # 在当前事件循环中执行同步调用
+    # invoke_with_skill_or_llm 内部会调用 asyncio.run()
+    # 我们需要确保它完全执行完毕
+
+    loop = asyncio.get_event_loop()
+    
+    # 在线程池中执行同步函数，避免阻塞事件循环
+    out = await loop.run_in_executor(
+        None,
+        lambda: invoke_with_skill_or_llm(
+            skill_registry, model, "检测标书bid_id=1是否盖有公章"
+        )
     )
-    assert out["mode"] == "skill"
-    assert out["router"].execution_mode == "skill"
-    assert isinstance(
-        out["invoke_result"]["structured_response"], SkillComplianceListFormat
-    )
+    
+    # 验证路由结果
+    assert out["mode"] == "skill", f"期望 mode='skill'，实际为 '{out['mode']}'"
+    assert out["router"].execution_mode == "skill", \
+        f"期望 execution_mode='skill'，实际为 '{out['router'].execution_mode}'"
+    print(f"执行结果: {out['invoke_result']}")
+
+    # 验证结构化响应
+    structured_response = out["invoke_result"]["structured_response"]
+    assert isinstance(structured_response, SkillComplianceListFormat), \
+        f"期望 SkillComplianceListFormat，实际为 {type(structured_response).__name__}"
+
+    # 验证items内容
+    items = extract_skill_compliance_items(out["invoke_result"])
+    assert len(items) >= 1, f"期望至少1个item，实际为 {len(items)}"
+
+    # 打印结果用于调试
+    print(f"\n=== 测试结果 ===")
+    print(f"Mode: {out['mode']}")
+    print(f"Items count: {len(items)}")
+    for i, item in enumerate(items):
+        print(f"  Item {i}: is_compliant={item.is_compliant}; {item.model_dump_json(indent=4, ensure_ascii=False)}")

@@ -1,8 +1,10 @@
+import sys
 from pathlib import Path
 
 from langchain_core.tools import BaseTool, tool
 
 from agent.skill.skill import SkillContent
+from agent.tools.tender_base_tool import query_tender_keyword
 
 
 @tool
@@ -13,126 +15,71 @@ def sys_execute_script_tool(command: str, script_path: str):
     :param script_path: 脚本路径
     """
     import subprocess
-    import sys
-    import os
     import platform
+    import os
 
     try:
-        # 检查脚本路径是否存在
+        # 验证脚本路径是否存在
         if not os.path.exists(script_path):
-            return f"错误: 脚本路径不存在 - {script_path}"
-
+            return f"错误: 脚本文件不存在 - {script_path}"
+        
         # 获取操作系统类型
-        os_name = platform.system().lower()  # 'windows', 'linux', 'darwin', etc.
+        os_name = platform.system().lower()
         
-        # 获取脚本绝对路径和工作目录
-        abs_script_path = os.path.abspath(script_path)
-        work_dir = os.path.dirname(abs_script_path)
-        
-        # 确定默认解释器
-        file_ext = os.path.splitext(script_path)[1].lower()
-        
-        # 如果 command 为空，根据文件扩展名和操作系统推断解释器
-        if not command or command.strip() == "":
-            if file_ext in ['.py']:
-                full_command = [sys.executable, abs_script_path]
-            elif file_ext in ['.sh', '.bash']:
-                if os_name == 'windows':
-                    # Windows 上尝试使用 Git Bash 或 WSL，如果不存在则报错或提示
-                    # 这里简单处理，尝试使用 sh (如果安装了 Git for Windows)
-                    full_command = ['sh', abs_script_path]
-                else:
-                    full_command = ['bash', abs_script_path]
-            elif file_ext in ['.bat', '.cmd']:
-                if os_name == 'windows':
-                    full_command = ['cmd', '/c', abs_script_path]
-                else:
-                    return f"错误: 在 {os_name} 系统上无法直接执行 .bat/.cmd 脚本"
-            elif file_ext in ['.ps1']:
-                if os_name == 'windows':
-                    full_command = ['powershell', '-ExecutionPolicy', 'Bypass', '-File', abs_script_path]
-                else:
-                    return f"错误: 在 {os_name} 系统上无法直接执行 .ps1 脚本"
-            elif file_ext in ['.js']:
-                full_command = ['node', abs_script_path]
-            else:
-                # 未知类型，默认尝试用当前 python 解释器或者 shell
-                # 为了安全，对于无后缀或未知后缀，如果没有指定 command，拒绝执行或默认用 python
-                full_command = [sys.executable, abs_script_path]
+        # 确定解释器
+        interpreter = []
+        if command and command.strip():
+            # 如果提供了命令，将其作为解释器或前缀
+            interpreter = command.strip().split()
         else:
-            # 用户指定了 command
-            cmd_parts = command.split()
-            executable = cmd_parts[0].lower()
-            
-            # 安全检查：白名单机制
-            allowed_executables = {
-                'python', 'python3', 
-                'node', 'npm', 
-                'bash', 'sh', 'zsh', 
-                'cmd', 'powershell', 'pwsh',
-                'pip', 'pip3'
-            }
-            
-            # 判断是否允许执行
-            is_allowed = False
-            if executable in allowed_executables:
-                is_allowed = True
-            elif os.path.isabs(executable) and os.path.isfile(executable):
-                # 允许绝对路径的可执行文件
-                is_allowed = True
-            elif os_name == 'windows' and executable in ['cmd.exe', 'powershell.exe']:
-                 is_allowed = True
-            
-            if not is_allowed:
-                return f"错误: 不允许执行的命令 '{executable}'。为了安全，仅支持常见解释器或绝对路径。"
-
-            # 构建完整命令
-            # 特殊处理 Windows 下的 cmd 和 powershell
-            if os_name == 'windows':
-                if executable in ['cmd', 'cmd.exe']:
-                    # cmd /c "command args script"
-                    # 这里假设 command 是 'cmd'，我们需要构造 'cmd /c script' 或者保留用户参数
-                    # 如果用户传的是 'cmd /c'，则 cmd_parts 已经是 ['cmd', '/c']
-                    if '/c' not in [p.lower() for p in cmd_parts]:
-                        full_command = ['cmd', '/c'] + cmd_parts[1:] + [abs_script_path]
-                    else:
-                        full_command = cmd_parts + [abs_script_path]
-                elif executable in ['powershell', 'powershell.exe', 'pwsh']:
-                    if '-file' not in [p.lower() for p in cmd_parts]:
-                        full_command = cmd_parts + ['-File', abs_script_path]
-                    else:
-                        full_command = cmd_parts + [abs_script_path]
-                else:
-                    full_command = cmd_parts + [abs_script_path]
+            # 根据脚本后缀自动选择解释器
+            ext = os.path.splitext(script_path)[1].lower()
+            if ext in ['.py']:
+                interpreter = [sys.executable]  # 使用当前 Python 解释器
+            elif ext in ['.sh', '.bash'] and os_name != 'windows':
+                interpreter = ['bash']
+            elif ext in ['.bat', '.cmd'] and os_name == 'windows':
+                interpreter = ['cmd', '/c']
+            elif ext in ['.ps1'] and os_name == 'windows':
+                interpreter = ['powershell', '-ExecutionPolicy', 'Bypass', '-File']
             else:
-                # Linux/Mac
-                full_command = cmd_parts + [abs_script_path]
+                # 尝试直接执行（适用于有 shebang 的脚本或可执行文件）
+                interpreter = []
 
-        # 执行命令
-        # shell=True 在某些情况下需要，但为了安全尽量使用列表形式执行
-        # 对于 cmd /c 这种结构，subprocess.run 列表形式通常也能工作，但有时需要 shell=True
-        # 这里保持列表形式，大多数情况足够
+        # 构建完整命令
+        full_command = interpreter + [script_path]
         
+        # 在 Windows 上，如果直接使用列表形式调用 subprocess，某些内置命令可能无法正常工作
+        # 但对于脚本执行，通常列表形式更安全
+        
+        # 执行脚本
         result = subprocess.run(
             full_command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
             text=True,
-            cwd=work_dir,
-            # 在 Windows 上，如果启动新进程，可能需要 creationflags 来隐藏窗口等，这里保持默认
+            encoding='utf-8',
+            timeout=300  # 设置5分钟超时，防止无限挂起
         )
-
-        output = result.stdout
-        error = result.stderr
-
-        if result.returncode != 0:
-            return f"执行失败 (返回码: {result.returncode}):\nStdout:\n{output}\nStderr:\n{error}"
         
-        return f"执行成功:\n{output}"
+        output = result.stdout
+        error_output = result.stderr
+        
+        if result.returncode != 0:
+            return (
+                f"脚本执行失败 (返回码: {result.returncode}):\n"
+                f"Stdout:\n{output}\n"
+                f"Stderr:\n{error_output}"
+            )
+        
+        return f"脚本执行成功:\n{output}" if output else "脚本执行成功，无输出。"
 
+    except subprocess.TimeoutExpired:
+        return "错误: 脚本执行超时 (超过5分钟)"
     except Exception as e:
         return f"发生错误: {str(e)}"
+   
 
 def _read_text_file(abs_path: Path) -> str:
     try:
@@ -332,7 +279,8 @@ def sys_install_module_tool(command: str):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
-            text=True
+            text=True,
+            encoding='utf-8'
         )
 
         if result.returncode != 0:
@@ -350,6 +298,7 @@ def get_registered_system_tools() -> list[BaseTool]:
         sys_execute_script_tool,
         sys_load_references_tool,
         sys_install_module_tool,
+        query_tender_keyword
     ]
 
 

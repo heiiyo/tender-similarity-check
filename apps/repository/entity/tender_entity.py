@@ -15,7 +15,8 @@ class BidPlagiarismCheckTask(Base):
     task_name = Column(String(100), nullable=False)
     file_name_list = Column(String(255), nullable=False)
     file_id_list = Column(String(255), nullable=False)
-    process_status = Column(String(20), default="processing")  # 进度状态：completed, processing, parsed, failed
+    process_status = Column(String(20), default="processing", comment="进度状态：completed, processing, parsed, failed")  # 进度状态：completed, processing, parsed, failed
+    task_type = Column(Integer, comment="任务类型：1-通用，2-民用，3-军用")
 
 
 class SubBidPlagiarismCheckTask(Base):
@@ -56,9 +57,9 @@ class TenderComplianceRiskRecord(Base):
     sub_compliance_check_task_id = Column(Integer, nullable=False, comment="任务合规任务子表id")
     tender_file_id = Column(Integer, nullable=False, comment="标书id")
     bid_plagiarism_check_task_id = Column(Integer, nullable=False, comment="任务id")
-    risk_description = Column(Text, nullable=False, comment="风险描述")
-    tender_page = Column(Integer, comment="标书不合规所在页")
-    is_risk = Column(Integer, default=1, comment="1-风险；0-无风险")
+    check_basis = Column(Text, nullable=False, comment="检查依据：说明依据哪些工具结果、数据字段、页码或规则作出上述判定；")
+    page_number = Column(Integer, comment="标书对应的页码")
+    is_compliant = Column(Integer, default=1, comment="1-合规；0-不合规")
     rule_id = Column(Integer, comment="规则id")
 
 
@@ -90,11 +91,13 @@ class TenderRuleConfiguration(Base):
         标书合规检测规则库
     """
     __tablename__ = "tender_rule_configuration"
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(255), nullable=False)
-    remake = Column(Text, nullable=False)
-    topic = Column(String(255), nullable=False)
-    skill = Column(String(255), nullable=False)
+    id = Column(Integer, primary_key=True, index=True, comment="主键id")
+    rule_name = Column(String(255), nullable=False, comment="规则名称")
+    rule_description = Column(Text, nullable=False, comment="规则描述")
+    skill_name = Column(String(255), nullable=False, comment="技能名称")
+    rule_type = Column(Integer, comment="规则类型：1-通用，2-民用，3-军用")
+    sort_order = Column(Integer, default=0, comment="排序字段")
+    is_deleted = Column(Integer, default=0, comment="是否删除：0-未删除，1-已删除")
 
 
 class TenderTopic(Base):
@@ -118,5 +121,6 @@ class TenderPDFImageEntity(Base):
     file_id = Column(Integer, nullable=False, comment="图片在文件记录表的id")
     page_number = Column(Integer, nullable=False, comment="改图片为标书的那些页")
     tender_file_id = Column(Integer, nullable=False, comment="标书文件在文件记录表的id")
+    page_context = Column(Text, nullable=True, comment="该标书对应页码的文档内容")
 
 

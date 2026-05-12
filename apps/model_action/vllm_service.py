@@ -120,24 +120,28 @@ async def handle_rule(rule: TenderRuleConfiguration,
                       sub_compliance_check_task_id: int,
                       bid_plagiarism_check_task_id: int):
     # 使用skill检查规则
-    result: SkillComplianceListFormat = run_skill_by_name(
+    result = run_skill_by_name(
         app_context.agent_model,
-        rule.skill,
+        rule.skill_name,
         instruction_params={"bid_id": tender_file_id},
     )
+    result_list: SkillComplianceListFormat = result["structured_response"]
+    print(f"handle_rule: result-{result}")
+
     # 将结果写入数据库
     with app_context.db_session_factory() as session:
         risk_records = []
-        for item in result.items:
+        for item in result_list.items:
             # is_compliant为False表示有风险（is_risk=1），为True表示无风险（is_risk=0）
-            is_risk = 0 if item.is_compliant else 1
-            
+            is_compliant_value = 1 if item.is_compliant else 0
+
             risk_record = TenderComplianceRiskRecord(
                 sub_compliance_check_task_id=sub_compliance_check_task_id,
                 tender_file_id=tender_file_id,
                 bid_plagiarism_check_task_id=bid_plagiarism_check_task_id,
-                risk_description=item.check_basis,
-                is_risk=is_risk,
+                check_basis=item.check_basis,
+                page_number=item.page_number if hasattr(item, 'page_number') else None,
+                is_compliant=is_compliant_value,
                 rule_id=rule.id
             )
             risk_records.append(risk_record)
@@ -145,7 +149,6 @@ async def handle_rule(rule: TenderRuleConfiguration,
         if risk_records:
             session.add_all(risk_records)
             session.commit()
-    
     return result
 
 

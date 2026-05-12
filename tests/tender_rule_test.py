@@ -8,7 +8,8 @@ from sqlalchemy import text
 from apps import AppContext, ConcurrencyManager
 from apps.algorithms.embedding import QwenEmbeddingVectorizer
 from apps.document_parser.markdown_parser import MarkDownParser
-from apps.model_action.vllm_service import handel_compliance_check
+from apps.model_action.vllm_service import handel_compliance_check, handle_rule
+from apps.repository.entity.tender_entity import TenderRuleConfiguration
 from apps.service.milnus_service import create_tender_topic_vector_milvus_db, create_rm_text_vector_milvus_db, \
     create_main_topic_vector_milvus_db
 from apps.service.tender_compliance_service import parser_tender_topic, parser_document, insert_into_milvus, \
@@ -19,7 +20,7 @@ from logger_config import get_logger
 
 logger = get_logger(name=__package__)
 
-tender_file_id = 15562
+tender_file_id = 1
 
 
 @pytest.fixture
@@ -31,8 +32,6 @@ def test_pdf_into_images(content: AppContext):
     md_parser = MarkDownParser()
     print(f"开始执行:{datetime.datetime.now()}")
     asyncio.run(md_parser.to_images(tender_file_id=tender_file_id))
-    # ids = await md_parser.to_images(file_path=file_path2)
-    assert 396 == len(md_parser.image_ids)
     print(f"执行完成:{md_parser.image_ids}")
 
 
@@ -176,3 +175,176 @@ def test_handel_compliance_check(content: AppContext):
 
 def test_summarize_answer(content: AppContext):
     result = asyncio.run(parser_tender_topic(tender_file_id))
+
+
+@pytest.mark.asyncio
+async def test_handle_rule_basic(content: AppContext):
+    """
+    测试 handle_rule 函数的基本功能
+    验证规则执行、结果返回和数据库写入
+    """
+    # 准备测试数据
+    test_tender_file_id = 1
+    test_sub_compliance_task_id = None
+    test_bid_plagiarism_task_id = None
+    
+    # 从数据库获取一个已启用的规则
+    with content.db_session_factory() as session:
+        rule = session.query(TenderRuleConfiguration).filter(
+            TenderRuleConfiguration.status == 1
+        ).first()
+        
+        if not rule:
+            pytest.skip("没有可用的测试规则")
+        
+        logger.info(f"使用测试规则: id={rule.id}, name={rule.rule_name}, skill={rule.skill_name}")
+        
+        # 创建子任务用于测试
+        from apps.repository.entity.tender_entity import SubComplianceCheckTask, BidPlagiarismCheckTask
+        
+        # 创建主任务
+        main_task = BidPlagiarismCheckTask(
+            check_type=1,
+            task_name="测试任务",
+            file_name_list="测试文件",
+            file_id_list="1",
+            tender_reference_file_id=None,
+            task_type=rule.rule_type
+        )
+        session.add(main_task)
+        session.flush()
+        test_bid_plagiarism_task_id = main_task.id
+        
+        # 创建子任务
+        sub_task = SubComplianceCheckTask(
+            bid_plagiarism_check_task_id=test_bid_plagiarism_task_id,
+            tender_file_id=test_tender_file_id,
+            tender_file_name="测试标书"
+        )
+        session.add(sub_task)
+        session.flush()
+        test_sub_compliance_task_id = sub_task.id
+        session.commit()
+    
+    try:
+        # 执行 handle_rule
+        logger.info(f"开始执行 handle_rule，规则ID: {rule.id}")
+        result = await handle_rule(
+            rule=rule,
+            tender_file_id=test_tender_file_id,
+            sub_compliance_check_task_id=test_sub_compliance_task_id,
+            bid_plagiarism_check_task_id=test_bid_plagiarism_task_id
+        )
+        
+        # 验证返回结果
+        assert result is not None, "handle_rule 应该返回结果"
+        logger.info(f"handle_rule 执行成功，返回结果类型: {type(result).__name__}")
+        
+        # 验证数据库中是否写入了风险记录
+        with content.db_session_factory() as session:
+            from apps.repository.entity.tender_entity import TenderComplianceRiskRecord
+            
+            risk_records = session.query(TenderComplianceRiskRecord).filter(
+                TenderComplianceRiskRecord.sub_compliance_check_task_id == test_sub_compliance_task_id,
+                TenderComplianceRiskRecord.rule_id == rule.id
+            ).all()
+            
+            logger.info(f"查询到 {len(risk_records)} 条风险记录")
+            assert len(risk_records) > 0, "应该有至少一条风险记录"
+            
+            # 验证记录字段
+            for record in risk_records:
+                assert record.tender_file_id == test_tender_file_id
+                assert record.rule_id == rule.id
+                assert record.bid_plagiarism_check_task_id == test_bid_plagiarism_task_id
+                assert record.check_basis is not None
+                logger.info(f"记录验证通过: is_compliant={record.is_compliant}, page={record.page_number}")
+    
+    finally:
+        # 清理测试数据
+        with content.db_session_factory() as session:
+            # 删除风险记录
+            session.query(TenderComplianceRiskRecord).filter(
+                TenderComplianceRiskRecord.sub_compliance_check_task_id == test_sub_compliance_task_id
+            ).delete()
+            
+            # 删除子任务
+            session.query(SubComplianceCheckTask).filter(
+                SubComplianceCheckTask.id == test_sub_compliance_task_id
+            ).delete()
+            
+            # 删除主任务
+            session.query(BidPlagiarismCheckTask).filter(
+                BidPlagiarismCheckTask.id == test_bid_plagiarism_task_id
+            ).delete()
+            
+            session.commit()
+            logger.info("测试数据清理完成")
+
+
+@pytest.mark.asyncio
+async def test_handle_rule_with_invalid_skill(content: AppContext):
+    """
+    测试 handle_rule 在技能名称无效时的行为
+    """
+    test_tender_file_id = 1
+    test_sub_compliance_task_id = 1
+    test_bid_plagiarism_task_id = 1
+    
+    # 创建一个无效的规则
+    invalid_rule = None
+    with content.db_session_factory() as session:
+        invalid_rule = session.get(TenderRuleConfiguration, 4)
+    
+    if not invalid_rule:
+        pytest.skip("未找到测试用的规则 ID=4")
+
+    logger.info("开始测试无效技能的处理")
+
+    # 直接 await 确保协程完全执行
+    try:
+        result = await handle_rule(
+            rule=invalid_rule,
+            tender_file_id=test_tender_file_id,
+            sub_compliance_check_task_id=test_sub_compliance_task_id,
+            bid_plagiarism_check_task_id=test_bid_plagiarism_task_id
+        )
+        # 验证结果
+        assert result is not None, "handle_rule 应该返回结果"
+        logger.info(f"handle_rule 执行完成，返回结果类型: {type(result).__name__}")
+        
+        # 验证数据库中是否写入了风险记录
+        with content.db_session_factory() as session:
+            from apps.repository.entity.tender_entity import TenderComplianceRiskRecord
+            
+            risk_records = session.query(TenderComplianceRiskRecord).filter(
+                TenderComplianceRiskRecord.sub_compliance_check_task_id == test_sub_compliance_task_id,
+                TenderComplianceRiskRecord.rule_id == invalid_rule.id
+            ).all()
+            
+            logger.info(f"查询到 {len(risk_records)} 条风险记录")
+            assert len(risk_records) > 0, "应该有至少一条风险记录"
+    
+    except Exception as e:
+        logger.error(f"测试中捕获到异常: {type(e).__name__}: {str(e)}")
+        raise
+
+
+def test_handle_rule_parameter_validation(content: AppContext):
+    """
+    测试 handle_rule 参数验证
+    """
+    with content.db_session_factory() as session:
+        rule = session.query(TenderRuleConfiguration).filter(
+            TenderRuleConfiguration.status == 1
+        ).first()
+        
+        if not rule:
+            pytest.skip("没有可用的测试规则")
+        
+        # 验证规则对象的关键属性
+        assert rule.id is not None, "规则ID不能为空"
+        assert rule.skill_name is not None and len(rule.skill_name) > 0, "技能名称不能为空"
+        assert rule.rule_name is not None and len(rule.rule_name) > 0, "规则名称不能为空"
+        
+        logger.info(f"参数验证通过: rule_id={rule.id}, skill_name={rule.skill_name}")

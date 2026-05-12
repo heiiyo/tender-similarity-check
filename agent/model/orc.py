@@ -8,7 +8,7 @@ orc_model = ChatSiliconFlow(
             model="PaddlePaddle/PaddleOCR-VL-1.5",
             temperature=0,
             max_tokens=1000,
-            timeout=30
+            timeout=300
         )
 
 def get_orc_model():

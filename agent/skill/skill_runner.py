@@ -141,21 +141,27 @@ def run_skill_by_name(
     instruction_params: 用于替换手册正文中的 `{{key}}` 占位符，例如
     ``{"query": "审计报表", "file_id": 1}`` 对应 ``{{query}}``、``{{file_id}}``。
     """
+    print(f"run_skill_by_name: model-{model}")
+    print(f"run_skill_by_name: skill_name-{skill_name}")
     tools, instructions = load_skill(skill_name)
     final_instructions = apply_instruction_params(instructions, instruction_params)
+    print(f"run_skill_by_name: final_instructions-{final_instructions}")
     skill_agent = create_agent(
         model,
         tools=tools,
         system_prompt=SKILL_EXECUTOR_SYSTEM_PROMPT,
         response_format=SkillComplianceListFormat,
     )
-    return skill_agent.invoke({"messages": [HumanMessage(content=final_instructions)]})
+    result = skill_agent.invoke({"messages": [HumanMessage(content=final_instructions)]})
+    print(f"run_skill_by_name: result-{result}")
+    return result
 
 
 def run_system_tools_agent(model: Any, user_message: str, tools: list[BaseTool]) -> dict:
     """挂载系统工具，基于用户原问题让模型自行决定调用（调用前须保证 tools 非空）。"""
     agent = create_agent(
-        model, tools=tools, system_prompt=SYSTEM_TOOLS_EXECUTOR_SYSTEM_PROMPT
+        model, tools=tools, system_prompt=SYSTEM_TOOLS_EXECUTOR_SYSTEM_PROMPT,
+        response_format = SkillComplianceListFormat
     )
     return agent.invoke({"messages": [HumanMessage(user_message)]})
 
