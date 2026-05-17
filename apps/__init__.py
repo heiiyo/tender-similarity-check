@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from minio import Minio, S3Error
 from pathlib import Path
 from pymilvus import connections
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, QueuePool
 from sqlalchemy.orm import sessionmaker
 
 from apps.tools.asyncio_tool import ConcurrencyManager
@@ -61,30 +61,52 @@ class AppContext:
 
     def _init_mysql(self):
         """
-        初始化mysql数据库连接
+        初始化mysql数据库连接，配置连接池
         """
         mysql_conf = self.mysql_config
-        # 创建引擎
+
+        # 连接池配置参数
+        pool_size = mysql_conf.get("pool_size", 10)  # 连接池大小，默认10
+        max_overflow = mysql_conf.get("max_overflow", 20)  # 超出pool_size后最多可创建的连接数，默认20
+        pool_timeout = mysql_conf.get("pool_timeout", 30)  # 获取连接的超时时间（秒），默认30秒
+        pool_recycle = mysql_conf.get("pool_recycle", 300)  # 连接回收时间（秒），防止MySQL 8小时超时，默认300秒
+        pool_pre_ping = mysql_conf.get("pool_pre_ping", True)  # 每次使用前检查连接是否有效，默认True
+        echo = mysql_conf.get("echo", False)  # 是否打印SQL日志，生产环境建议False
+
+        # 创建引擎，配置连接池
         engine = create_engine(
             mysql_conf["database_url"],
-            pool_pre_ping=True,  # 自动重连
-            pool_recycle=mysql_conf["pool_recycle"],  # 5分钟回收连接（防 MySQL 8h 超时）
-            echo=True,  # 生产设为 False
-
+            poolclass=QueuePool,  # 使用队列连接池（推荐用于生产环境）
+            pool_size=pool_size,  # 连接池大小
+            max_overflow=max_overflow,  # 最大溢出连接数
+            pool_timeout=pool_timeout,  # 获取连接超时时间
+            pool_recycle=pool_recycle,  # 连接回收时间
+            pool_pre_ping=pool_pre_ping,  # 自动重连
+            echo=echo,  # SQL日志
+            pool_use_lifo=True,  # 使用LIFO算法，提高连接复用率
         )
+
         self.engine = engine
+
         # 创建会话工厂
-        db_session_factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        db_session_factory = sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            bind=engine,
+            expire_on_commit=False  # 提交后不立即过期对象，提高性能
+        )
+
         if self.app:
             self.app.state.db_engine = engine
-            self.app.state.db_session_factory: sessionmaker = db_session_factory
+            self.app.state.db_session_factory = db_session_factory
+
         self.db_engine = engine
-        self.db_session_factory: sessionmaker = db_session_factory
+        self.db_session_factory = db_session_factory
+
         # 自动建表（仅开发环境建议使用！）
-        # 基类
         from apps.repository.entity import Base
         from apps.repository.entity.file_entity import FileRecordEntity
-        from apps.repository.entity.tender_entity import BidPlagiarismCheckTask, SubBidPlagiarismCheckTask, DocumentSimilarityRecord,TenderRuleConfiguration, TenderPDFImageEntity
+        from apps.repository.entity.tender_entity import BidPlagiarismCheckTask, SubBidPlagiarismCheckTask, DocumentSimilarityRecord, TenderRuleConfiguration, TenderPDFImageEntity
         Base.metadata.create_all(bind=engine)
 
     def _init_milvus(self):

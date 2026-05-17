@@ -1,11 +1,13 @@
-version: '2.2'
-
 services:
   web-app:
     container_name: tender-check
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: tender:v2.1
+    restart: unless-stopped
     environment:
-      - TZ=Asia/Shanghai  # 设置时区
+      TZ: Asia/Shanghai
     ports:
       - "30018:8000"
     volumes:
