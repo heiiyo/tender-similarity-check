@@ -6,7 +6,7 @@ from pymilvus import (
     utility, MilvusException
 )
 
-from apps.algorithms.embedding import OllamaQwenEmbeddingVectorizer, QwenEmbeddingVectorizer
+from apps.algorithms.embedding import QwenEmbeddingVectorizer
 from apps.document_parser.base import HDocument
 
 # ------------------- 1. 初始化配置 -------------------

@@ -214,31 +214,43 @@ class BaseParser(ABC):
             
         return documents
 
+    def _render_pdf_pages(self, tender_file_id: int, zoom: float = 3.0) -> List[tuple]:
+        """同步渲染 PDF 各页为 PNG 字节（在线程池中执行，避免阻塞事件循环）。"""
+        app_context = AppContext()
+        minio_client = app_context.minio_client
+        with app_context.db_session_factory() as session:
+            task_record: FileRecordEntity = session.get(FileRecordEntity, tender_file_id)
+        with minio_client.get_object(task_record.business_id, task_record.file_path) as response:
+            file_data = response.read()
+        pdf_stream = BytesIO(file_data)
+        doc: fitz.Document = fitz.open(stream=pdf_stream)
+        pages: List[tuple] = []
+        try:
+            mat = fitz.Matrix(zoom, zoom)
+            for page_num in range(len(doc)):
+                page: fitz.Page = doc.load_page(page_num)
+                pix: fitz.Pixmap = page.get_pixmap(matrix=mat)
+                pages.append((page_num + 1, pix.tobytes()))
+        finally:
+            doc.close()
+        return pages
+
     async def to_images(self, tender_file_id, zoom=3.0):
         """
         使用 PyMuPDF 快速转换 PDF 为图片
         :param tender_file_id 标书文件id
         :param zoom: 缩放倍率 (zoom=3.0 约等于 300 DPI，视原图大小而定)
         """
-        app_context = AppContext()
-        minio_client = app_context.minio_client
-        with app_context.db_session_factory() as session:
-            task_record: FileRecordEntity = session.get(FileRecordEntity, tender_file_id)
-        with minio_client.get_object(task_record.business_id, task_record.file_path) as response:
-            file_data = response.read()  # 自动 close + release_conn
-        pdf_stream = BytesIO(file_data)
         from apps.service.file_service import task_upload
-        doc: fitz.Document = fitz.open(stream=pdf_stream)
+
+        pages = await asyncio.to_thread(self._render_pdf_pages, tender_file_id, zoom)
         res = []
-        for i in range(0, len(doc), 20):
-            batch_tasks = []
-            for page_num in range(i, min(i + 20, len(doc))):
-                page: fitz.Page = doc.load_page(page_num)
-                # 设置变换矩阵，控制分辨率
-                # zoom=3.0 对应约 300 DPI (72 * 3 = 216, 实际效果取决于文档原始定义)
-                mat = fitz.Matrix(zoom, zoom)
-                pix: fitz.Pixmap = page.get_pixmap(matrix=mat)
-                batch_tasks.append(task_upload(pix.tobytes(), "png", "images", page_num+1, tender_file_id))
+        for i in range(0, len(pages), 20):
+            batch = pages[i:i + 20]
+            batch_tasks = [
+                task_upload(pix_bytes, "png", "images", page_num, tender_file_id)
+                for page_num, pix_bytes in batch
+            ]
             results = await asyncio.gather(*batch_tasks, return_exceptions=True)
             res.extend(results)
         self.image_ids = res
@@ -265,6 +277,7 @@ class BaseParser(ABC):
             files = {"files": data_stream}
             res = requests.post(url, files=files, data=data)
             item = res.json()
+            print(f"_mineru266 解析结果{item}")
             for k1 in item["results"]:
                 text = item["results"][k1]["md_content"]
                 images = item["results"][k1]["images"]

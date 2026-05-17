@@ -69,6 +69,6 @@ def setup_logging(level="INFO"):
     print(f"✅ 日志系统已初始化，级别: {level}")
 
 
-def get_logger(name=__package__):
+def get_logger(name=__name__):
     logger = logging.getLogger(name)
     return logger

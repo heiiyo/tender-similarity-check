@@ -18,8 +18,9 @@ class TenderComplianceDTO(BaseModel):
 class ComplianceRulesConditionDTO(BasePageDto):
     rule_name: Optional[str] = Field(default=None, description="规则名称")
     status: Optional[int] = Field(default=None, description="合规规则库状态：1-启用，2-禁用")
-    rule_type: Optional[int] =  Field(default=None, description="规则类型：1-通用，2-民用，3-军用")
+    rule_type: Optional[int] = Field(default=None, description="规则类型：1-通用，2-民用，3-军用")
 
 
 class ComplianceInfoConditionDto(BaseModel):
     tender_id: Optional[int] = None
+    check_type: Optional[int] = Field(default=2, description="规则类型：0-风险项，1-合格项，2-检测项")

@@ -1,10 +1,10 @@
 services:
   web-app:
     container_name: tender-check
+    image: tender:v3.1
     build:
       context: .
       dockerfile: Dockerfile
-    image: tender:v2.1
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai

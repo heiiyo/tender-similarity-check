@@ -1,3 +1,4 @@
+import asyncio
 import urllib
 from datetime import datetime
 from io import BytesIO
@@ -28,7 +29,7 @@ async def tender_check(tender_task_dto: TenderTaskDto, background_tasks: Backgro
 
 @tender_router.post("/tender_task_list", response_model=BaseResponse)
 async def tender_task_list(condition: TenderConditionDto):
-    page = get_tender_task_list(condition)
+    page = await asyncio.to_thread(get_tender_task_list, condition)
     return BaseResponse.success(page)
 
 
@@ -39,13 +40,13 @@ async def tender_sub_task_list(task_id, base_page: BasePageDto):
     :param task_id: 标书检测任务id
     :return:
     """
-    page = get_tender_sub_task_list(task_id, base_page)
+    page = await asyncio.to_thread(get_tender_sub_task_list, task_id, base_page)
     return BaseResponse.success([page])
 
 
 @tender_router.post("/tender_similarity_info/{sub_task_id}", response_model=BaseResponse)
 async def tender_similarity_info(sub_task_id):
-    data = get_tender_similarity_info(sub_task_id)
+    data = await asyncio.to_thread(get_tender_similarity_info, sub_task_id)
     if not data:
         return BaseResponse.error(message="查询任务失败，或不存在")
     return BaseResponse.success([data])
@@ -53,7 +54,7 @@ async def tender_similarity_info(sub_task_id):
 
 @tender_router.post("/tender_similarity_info_by_file_id", response_model=BaseResponse)
 async def tender_similarity_info_by_file_id(tender_similarity_dto: TenderSimilarityDto):
-    data = get_tender_similarity_info_by_file_id(tender_similarity_dto)
+    data = await asyncio.to_thread(get_tender_similarity_info_by_file_id, tender_similarity_dto)
     if not data:
         return BaseResponse.error(message="查询任务失败，或不存在")
     return BaseResponse.success([data])
@@ -61,19 +62,19 @@ async def tender_similarity_info_by_file_id(tender_similarity_dto: TenderSimilar
 
 @tender_router.post("/update_tender_similarity_info_id/{info_id}", response_model=BaseResponse)
 async def update_tender_similarity_info_id(info_id):
-    update_tender_similarity_info(info_id)
+    await asyncio.to_thread(update_tender_similarity_info, info_id)
     return BaseResponse.success(info_id)
 
 
 @tender_router.post("/batch_update_tender_similarity_info_id", response_model=BaseResponse)
 async def batch_update_tender_similarity_info_id(ids: BatchIds):
-    batch_update_tender_similarity_info(ids.ids)
+    await asyncio.to_thread(batch_update_tender_similarity_info, ids.ids)
     return BaseResponse.success(ids.ids)
 
 
 @tender_router.get("/export_similarity_report_by_task_id/{task_id}")
 async def export_similarity_report_by_task_id(task_id):
-    buffer = export_similarity_report_task_id(task_id)
+    buffer = await asyncio.to_thread(export_similarity_report_task_id, task_id)
     # file_id, url = await upload_file_bytes(buffer.read(), "xlsx", "report")
     filename = f"similarity_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     from fastapi.responses import StreamingResponse
@@ -93,7 +94,7 @@ async def export_similarity_report_by_sub_task_id(sub_task_id):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "相似性对比"
-    export_similarity_report(sub_task_id, wb)
+    await asyncio.to_thread(export_similarity_report, sub_task_id, wb)
     # 2. 创建内存流
     buffer = BytesIO()
     # 6. 保存 Excel 到内存流

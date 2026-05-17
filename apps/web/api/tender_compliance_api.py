@@ -5,10 +5,10 @@ from fastapi import APIRouter
 from apps.service.tender_compliance_service import add_compliance_rule, update_compliance_rule_info, \
     query_compliance_rules_list, query_tender_compliance_list, query_tender_compliance_info, \
     update_compliance_rule_sort_order, query_all_compliance_rules, get_compliance_rule_by_id, \
-    delete_compliance_rule_by_id, delete_skill_by_name
+    delete_compliance_rule_by_id, delete_skill_by_name, get_compliance_info
 from apps.web.dto.compliance_dto import TenderComplianceDTO, ComplianceRulesConditionDTO, ComplianceInfoConditionDto
 from apps.web.dto.tender_task import BasePageDto
-from apps.web.vo.similarity_respose import BaseResponse, TenderTaskPage, FileRecordVO
+from apps.web.vo.similarity_respose import BaseResponse
 
 tender_compliance_router = APIRouter(prefix="/api/tender/compliance", tags=["标书合规 "])
 
@@ -112,3 +112,18 @@ def tender_compliance_list(task_id, page_dto: BasePageDto):
 def tender_compliance_info(compliance_info_condition: ComplianceInfoConditionDto):
     page = query_tender_compliance_info(compliance_info_condition)
     return BaseResponse.success(data=page)
+
+
+@tender_compliance_router.post("/compliance_info", response_model=BaseResponse, description="根据标书ID获取合规检测信息")
+def get_tender_compliance_info(compliance_info_condition: ComplianceInfoConditionDto):
+    """
+    根据标书tender_id获取合规检测信息
+    :param tender_id: 标书ID
+    :return: 合规检测信息列表
+    """
+    compliance_info_list = get_compliance_info(compliance_info_condition)
+    return BaseResponse.success(data=compliance_info_list)
+
+
+
+

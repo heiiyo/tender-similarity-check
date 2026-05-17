@@ -143,13 +143,6 @@ class AppContext:
             if "BucketAlreadyOwnedByYou" not in str(e):
                 raise
 
-
-    def _init_embedding(self):
-        from apps.model_action.llm import EmbeddingModel
-        embedding_model_config = self.embedding_config
-        self.embedding_model = EmbeddingModel(url=embedding_model_config['url'], model_name=embedding_model_config['model_name'], api_key=embedding_model_config['api_key'])
-
-
     def _init_llm(self):
         from apps.model_action.llm import LLMModel
         llm_model_config = self.llm_model_config
@@ -166,4 +159,12 @@ class AppContext:
                                     max_tokens=llm_model_config['max_tokens'],
                                     timeout=llm_model_config['timeout'],
                                     extra_body=llm_model_config['extra_body'])
-        print(self.agent_model.model_dump_json())
+
+    def _init_embedding(self):
+        from apps.algorithms.embedding import QwenEmbeddingVectorizer
+        embedding_model_config = self.embedding_config
+        self.embedding_vectorizer = QwenEmbeddingVectorizer(
+            api_key=embedding_model_config['api_key'],
+            model_name=embedding_model_config['model_name'],
+            base_url=embedding_model_config['url']
+        )
