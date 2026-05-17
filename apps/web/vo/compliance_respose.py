@@ -38,7 +38,10 @@ class ComplianceInfoVO(BaseModel):
     rule_id: Optional[int] = Field(description="规则id")
     rule_name: Optional[str] = Field(description="规则名称")
     rule_description: Optional[str] = Field(description="规则描述")
+    abnormal_count: Optional[int] = Field(description="异常条目")
+    normal_count: Optional[int] = Field(description="正常条目")
     compliance_list: Optional[List[SkillComplianceFormat]] = Field(description="规则检测结果")
+    
 
 
 class TenderComplianceInfoVO(BaseModel):

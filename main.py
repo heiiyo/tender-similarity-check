@@ -1,4 +1,3 @@
-# app/main.py
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -8,8 +7,6 @@ from starlette.middleware.cors import CORSMiddleware
 
 from apps import AppContext
 from logger_config import get_logger, setup_logging
-
-logger = get_logger(name=__name__)
 
 current_file = Path(__file__).resolve()
 # 获取项目跟路径
@@ -40,13 +37,13 @@ app.add_middleware(
 if __name__ == "__main__":
     """启动 FastAPI 应用"""
     setup_logging()
+    logger = get_logger(name=__name__)
     logger.info("--------------tender 服务启动-------------------")
     uvicorn.run(
         "main:app",      # 模块:实例
         host="0.0.0.0",
         port=8000,
         reload=True,         # 开发时开启自动重载
-        log_level="info",
-        log_config=None
+        log_level="info"
     )
 

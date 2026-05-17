@@ -7,7 +7,6 @@ from io import BytesIO
 from typing import List
 
 from anyio import Path
-from fastapi import BackgroundTasks
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 from sqlalchemy.sql.operators import and_
@@ -31,7 +30,7 @@ from apps.web.vo.similarity_respose import TenderTaskPage, FileRecordVO
 
 from logger_config import get_logger
 
-logger = get_logger(name=__package__)
+logger = get_logger(name=__name__)
 app_context = AppContext()
 
 
@@ -239,28 +238,38 @@ def query_compliance_rules_list(rules_condition_dto: ComplianceRulesConditionDTO
     return page
 
 
-def create_compliance_check_task(tender_task_dto: TenderTaskDto, background_tasks: BackgroundTasks):
-    task_id = None
-    if tender_task_dto.file_ids and len(tender_task_dto.file_ids) > 0:
-        with app_context.db_session_factory() as session:
-            file_record_list = session.query(FileRecordEntity).filter(
-                FileRecordEntity.id.in_(tender_task_dto.file_ids)).all()
-            file_name_list = [file_record.file_name for file_record in file_record_list]
-            file_id_list = [file_record.id for file_record in file_record_list]
-            task = BidPlagiarismCheckTask(
-                check_type=tender_task_dto.task_type,
-                task_name=tender_task_dto.task_name,
-                file_name_list=",".join(file_name_list),
-                file_id_list=','.join(map(str, file_id_list)),
-                task_type=tender_task_dto.task_type,
-                tender_reference_file_id=tender_task_dto.tender_reference_id
-            )
-            session.add(task)
-            session.commit()
-            task_id = task.id
-        for tender_file_id in tender_task_dto.file_ids:
-            background_tasks.add_task(compliance_background_task, tender_file_id, task_id)
-    return task_id
+def create_compliance_check_task_record(tender_task_dto: TenderTaskDto):
+    """创建合规任务记录（同步，供接口立即返回任务信息）。"""
+    if not tender_task_dto.file_ids:
+        return None
+    with app_context.db_session_factory() as session:
+        file_record_list = session.query(FileRecordEntity).filter(
+            FileRecordEntity.id.in_(tender_task_dto.file_ids)).all()
+        file_name_list = [file_record.file_name for file_record in file_record_list]
+        file_id_list = [file_record.id for file_record in file_record_list]
+        task = BidPlagiarismCheckTask(
+            check_type=tender_task_dto.check_type,
+            task_name=tender_task_dto.task_name,
+            file_name_list=",".join(file_name_list),
+            file_id_list=','.join(map(str, file_id_list)),
+            task_type=tender_task_dto.task_type,
+            tender_reference_file_id=tender_task_dto.tender_reference_id
+        )
+        session.add(task)
+        session.commit()
+        return task.id
+
+
+async def run_compliance_checks_task(file_ids: List[int], task_id: int):
+    """合规检测步骤：步骤内并发，步骤间由流水线顺序保证。"""
+    max_concurrency = 3
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def process_one(tender_file_id: int):
+        async with semaphore:
+            await asyncio.to_thread(compliance_background_task, tender_file_id, task_id)
+
+    await asyncio.gather(*(process_one(fid) for fid in file_ids))
 
 
 def compliance_background_task(tender_file_id, task_id):
@@ -380,11 +389,17 @@ def query_tender_compliance_info(compliance_info_condition: ComplianceInfoCondit
                 )
                 compliance_list.append(compliance_item)
 
+            # 统计异常和正常条目数量
+            abnormal_count = sum(1 for item in compliance_list if not item.is_compliant)
+            normal_count = sum(1 for item in compliance_list if item.is_compliant)
+
             # 构建规则维度的合规信息
             compliance_info = ComplianceInfoVO(
                 rule_id=rule_id,
                 rule_name=rule.rule_name if rule else "",
                 rule_description=rule.rule_description if rule else "",
+                abnormal_count=abnormal_count,
+                normal_count=normal_count,
                 compliance_list=compliance_list
             )
             compliance_info_data.append(compliance_info)
@@ -401,6 +416,67 @@ def query_tender_compliance_info(compliance_info_condition: ComplianceInfoCondit
     )
     return page
 
+
+def get_compliance_info(compliance_info_condition: ComplianceInfoConditionDto) -> List[ComplianceInfoVO]:
+    """
+    根据标书tender_id获取合规检测信息
+    :param tender_id: 标书ID
+    :return: 合规检测信息列表
+    """
+    compliance_info_data = []
+
+    with app_context.db_session_factory() as session:
+        # 1. 查询该标书的所有合规风险记录
+        records = session.query(TenderComplianceRiskRecord).filter(
+            TenderComplianceRiskRecord.tender_file_id == compliance_info_condition.tender_id
+        ).all()
+
+        if not records:
+            logger.info(f"标书 {compliance_info_condition.tender_id} 没有合规检测记录")
+            return []
+
+        # 2. 按 rule_id 分组统计
+        rule_ids = set(record.rule_id for record in records if record.rule_id)
+
+        # 3. 为每个规则构建合规信息
+        for rule_id in rule_ids:
+            # 获取规则信息
+            rule = session.get(TenderRuleConfiguration, rule_id)
+
+            # 筛选条件
+            rule_records_all = [record for record in records if record.rule_id == rule_id]
+            if compliance_info_condition.check_type == 2:
+                rule_records = rule_records_all
+            else:
+                rule_records = [record for record in records
+                            if record.rule_id == rule_id and record.is_compliant==compliance_info_condition.check_type]
+
+            # 构建该规则下的所有检测结果
+            compliance_list = []
+            for record in rule_records:
+                compliance_item = SkillComplianceFormat(
+                    is_compliant=(record.is_compliant == 1),  # is_compliant=1 表示合规
+                    page_number=record.page_number if record.page_number else 0,
+                    check_basis=record.check_basis if record.check_basis else ""
+                )
+                compliance_list.append(compliance_item)
+
+            # 统计异常和正常条目数量（基于该规则的所有记录）
+            abnormal_count = sum(1 for record in rule_records_all if record.is_compliant == 0)
+            normal_count = sum(1 for record in rule_records_all if record.is_compliant == 1)
+
+            # 构建规则维度的合规信息
+            compliance_info = ComplianceInfoVO(
+                rule_id=rule_id,
+                rule_name=rule.rule_name if rule else "",
+                rule_description=rule.rule_description if rule else "",
+                abnormal_count=abnormal_count,
+                normal_count=normal_count,
+                compliance_list=compliance_list
+            )
+            compliance_info_data.append(compliance_info)
+
+    return compliance_info_data
 
 def update_compliance_rule_sort_order(sort_list: List[dict]):
     """
@@ -527,6 +603,7 @@ async def compliance_validation(tender_file_id):
 
 
 async def parser_tender_topic(tender_file_id):
+    logger.info(f"parser_tender_topic-{tender_file_id}开始")
     with app_context.db_session_factory() as session:
         tender_pdf_image_list = session.query(TenderPDFImageEntity)\
             .filter(and_(TenderPDFImageEntity.tender_file_id == tender_file_id, and_(TenderPDFImageEntity.page_number > 1, TenderPDFImageEntity.page_number < 10)))\
@@ -555,11 +632,13 @@ async def parser_tender_topic(tender_file_id):
         response = await agent.ainvoke({"messages": [HumanMessage(context)]})
         topic_formatted: TopicListFormat = response['structured_response']
         topic_list = [topic.topic_name for topic in topic_formatted.topics]
+        logger.info(f"parser_tender_topic-{tender_file_id}结束")
         return topic_list
 
 
 def parser_document(tender_file_id):
     logger.info(f"解析标书-{tender_file_id}开始")
+    print(f"解析标书-{tender_file_id}开始")
     with app_context.db_session_factory() as session:
         file_record = session.get(FileRecordEntity, tender_file_id)
         file_path = file_record.file_path
@@ -640,7 +719,7 @@ def insert_into_milvus(tender_file_id, topics, documents: HFiledocument):
                     tender_file_id=data["tender_file_id"]))
 
     logger.info(f"标书-{tender_file_id}一级目录入数据库")
-    embedding = QwenEmbeddingVectorizer()
+    embedding = AppContext().embedding_vectorizer
     # 目录入数据库
     if len(data_topic_list) > 0:
         with app_context.db_session_factory() as session:

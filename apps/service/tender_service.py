@@ -22,8 +22,8 @@ from apps.repository.entity.tender_entity import BidPlagiarismCheckTask, SubBidP
 from apps.repository.minio_repository import get_file_url, delete_object
 from apps.service.milnus_service import create_tender_vector_milvus_db, create_tender_reference_vector_milvus_db, \
     create_tender_topic_vector_milvus_db, create_rm_text_vector_milvus_db, create_main_topic_vector_milvus_db
-from apps.service.tender_compliance_service import create_compliance_check_task, parser_tender_topic, parser_document, \
-    insert_into_milvus
+from apps.service.tender_compliance_service import create_compliance_check_task_record, run_compliance_checks_task, \
+    parser_tender_topic, parser_document, insert_into_milvus
 from apps.web.dto.tender_task import TenderTaskDto, TenderConditionDto, BasePageDto, TenderSimilarityDto
 from apps.web.vo.similarity_respose import TenderTaskPage, format_datetime, TenderSimilarityVO, FileRecordVO, TaskDataVO
 
@@ -92,11 +92,9 @@ def start_plagiarism_check(tender_file_list, tender_reference_id):
     :param background_tasks: 后台任务对象，用于异步执行任务，fastApi自带
     """
     tasks: List = list(combinations(tender_file_list, 2))
-    # 异步解析招标文件
     if tender_reference_id:
-        handle_tender_tender_reference_file(tender_reference_id)
+        asyncio.run(handle_tender_tender_reference_file(tender_reference_id))
     for task in tasks:
-        # 遍历每个任务，并开始执行检测任务
         plagiarism_check_tasks(task, tender_reference_id)
 
 
@@ -111,59 +109,70 @@ def plagiarism_check_tasks(task, tender_reference_id = None):
 
 def bid_plagiarism_check(tender_task_dto: TenderTaskDto, background_tasks: BackgroundTasks):
     """
-    标书查重
-    :param tender_task_dto: 标书任务参数dto
-    :param background_tasks: 后台任务对象，用于异步执行任务，fastApi自带
-    :return:
+    标书查重/合规：仅注册一条后台流水线，各阶段按顺序执行，阶段内部可并发。
     """
-    # 解析标书文件
-    # background_tasks.add_task(tender_file_parser, tender_task_dto.file_ids)
+    task_id = None
+    tender_file_list = None
     if tender_task_dto.task_type == 1:
-        # 创建标书任务
         tender_file_list, task_id = create_plagiarism_check_tasks(tender_task_dto)
-        # 异步重复性处理
-        background_tasks.add_task(start_plagiarism_check, tender_file_list, tender_task_dto.tender_reference_id)
     elif tender_task_dto.task_type == 2:
-        task_id = create_compliance_check_task(tender_task_dto, background_tasks)
+        task_id = create_compliance_check_task_record(tender_task_dto)
     else:
-        pass
-    background_tasks.add_task(update_task_process_status, task_id)
+        return
+
+    background_tasks.add_task(
+        run_tender_check_pipeline,
+        tender_task_dto,
+        task_id,
+        tender_file_list,
+    )
 
 
-async def tender_file_parser(tender_file_ids):
+def run_tender_check_pipeline(
+    tender_task_dto: TenderTaskDto,
+    task_id: int,
+    tender_file_list: List = None,
+) -> None:
     """
-    在标书进行检测前，标书进行解析入库
-    :param tender_file_ids:
-    :return:
+    标书检测后台流水线（顺序执行）：
+    1. 解析标书入库
+    2. 查重或合规检测
+    3. 更新主任务状态
     """
-    for tender_file_id in tender_file_ids:
-        # 构建解析器
-        md_parser = MarkDownParser()
-        # 标书转化为图片
-        await md_parser.to_images(tender_file_id=tender_file_id)
-        # 解析文件内容
-        documents = parser_document(tender_file_id)
-        # 解析标题
-        topics = await parser_tender_topic(tender_file_id)
-        insert_into_milvus(tender_file_id, topics, documents)
+    logger.info("流水线开始: 解析标书 file_ids=%s", tender_task_dto.file_ids)
+    run_tender_file_parser_background(tender_task_dto.file_ids)
+
+    if tender_task_dto.task_type == 1:
+        logger.info("流水线: 查重检测 task_id=%s", task_id)
+        start_plagiarism_check(tender_file_list, tender_task_dto.tender_reference_id)
+    elif tender_task_dto.task_type == 2:
+        logger.info("流水线: 合规检测 task_id=%s", task_id)
+        asyncio.run(run_compliance_checks_task(tender_task_dto.file_ids, task_id))
+
+    logger.info("流水线: 更新任务状态 task_id=%s", task_id)
+    update_task_process_status(task_id)
+    logger.info("流水线结束 task_id=%s", task_id)
 
 
-# 定义后台任务函数
+def run_tender_file_parser_background(tender_file_ids: List[int]) -> None:
+    """在 BackgroundTasks 线程池中运行，使用独立事件循环执行解析协程。"""
+    asyncio.run(tender_file_parser_task(tender_file_ids))
+
+
 async def tender_file_parser_task(tender_file_ids: List[int]):
-    # 这里写入我们之前优化过的多协程逻辑
-    MAX_CONCURRENCY = 10
-    semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
+    """并发解析标书并入库；阻塞 I/O/CPU 通过 to_thread 移出事件循环。"""
+    max_concurrency = 3
+    semaphore = asyncio.Semaphore(max_concurrency)
 
-    async def process_single(file_id):
+    async def process_single(file_id: int):
         async with semaphore:
             md_parser = MarkDownParser()
             await md_parser.to_images(tender_file_id=file_id)
+            documents = await asyncio.to_thread(parser_document, file_id)
             topics = await parser_tender_topic(file_id)
-            documents = parser_document(file_id)
-            insert_into_milvus(file_id, topics, documents)
+            await asyncio.to_thread(insert_into_milvus, file_id, topics, documents)
 
-    tasks = [asyncio.create_task(process_single(fid)) for fid in tender_file_ids]
-    await asyncio.gather(*tasks)
+    await asyncio.gather(*(process_single(fid) for fid in tender_file_ids))
 
 
 def update_task_process_status(task_id):

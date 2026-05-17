@@ -17,6 +17,7 @@ from apps.document_parser.pdf_parser import PdfParser
 from apps.document_parser.pdf_parser_test import PdfParserTest
 from apps.document_parser.text_parser import TextParser
 from apps.service.milnus_service import create_tender_vector_milvus_db
+from apps.service.tender_compliance_service import parser_document
 from apps.splitting import overlapping_splitting
 
 
@@ -138,3 +139,8 @@ def mineru266(file_path=None, data_stream=None):
             images = item["results"][k1]["images"]
             content_list = item["results"][k1]["content_list"]
         return text, images, json.loads(content_list)
+
+def test_parser_document():
+    AppContext().init_context()
+    documents = parser_document(1236)
+    assert len(documents) == 383
