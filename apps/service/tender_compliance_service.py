@@ -9,6 +9,7 @@ from typing import List
 from anyio import Path
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
+from sqlalchemy import or_
 from sqlalchemy.sql.operators import and_
 
 from agent.format.out_format import TopicListFormat
@@ -28,8 +29,9 @@ from apps.web.vo.compliance_respose import ComplianceRulesPage, ComplianceRulesV
     TenderComplianceInfoVO, ComplianceInfoVO, SkillComplianceFormat
 from apps.web.vo.similarity_respose import TenderTaskPage, FileRecordVO
 
-from logger_config import get_logger
+from logger_config import get_logger, setup_logging
 
+setup_logging()
 logger = get_logger(name=__name__)
 app_context = AppContext()
 
@@ -527,22 +529,22 @@ async def compliance_validation(tender_file_id):
         
         # 2. 并行检查并处理图片和目录
         md_parser = MarkDownParser()
-        
+
         # 检查是否需要生成图片
         with app_context.db_session_factory() as session:
             has_images = session.query(TenderPDFImageEntity).filter(
                 TenderPDFImageEntity.tender_file_id == tender_file_id
             ).first() is not None
-        
+
         # 检查是否需要解析目录
         with app_context.db_session_factory() as session:
             has_topics = session.query(TenderTopic).filter(
                 TenderTopic.tender_file_id == tender_file_id
             ).first() is not None
-        
+
         # 构建并行任务列表
         parallel_tasks = []
-        
+
         # 任务1：生成图片（如果需要）
         if not has_images:
             parallel_tasks.append(md_parser.to_images(tender_file_id=tender_file_id))
@@ -555,7 +557,7 @@ async def compliance_validation(tender_file_id):
                 result = await parser_tender_topic(tender_file_id)
                 documents = parser_document(tender_file_id)
                 insert_into_milvus(tender_file_id, result, documents)
-            
+
             parallel_tasks.append(parse_and_index())
             logger.info(f"标书 {tender_file_id} 开始解析目录")
         
@@ -572,7 +574,7 @@ async def compliance_validation(tender_file_id):
             
             # 如果 task_type 有值，则添加 rule_type 过滤条件
             if task_type is not None:
-                query = query.filter(and_(TenderRuleConfiguration.rule_type == task_type, TenderRuleConfiguration.rule_type ==1))
+                query = query.filter(or_(TenderRuleConfiguration.rule_type == task_type, TenderRuleConfiguration.rule_type ==1))
                 logger.info(f"标书 {tender_file_id} 使用任务类型 {task_type} 匹配规则")
             else:
                 logger.warning(f"标书 {tender_file_id} 的任务类型为 None，将获取所有启用的规则")

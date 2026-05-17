@@ -9,6 +9,10 @@ from apps.service.tender_compliance_service import add_compliance_rule, update_c
 from apps.web.dto.compliance_dto import TenderComplianceDTO, ComplianceRulesConditionDTO, ComplianceInfoConditionDto
 from apps.web.dto.tender_task import BasePageDto
 from apps.web.vo.similarity_respose import BaseResponse
+from logger_config import get_logger, setup_logging
+
+setup_logging()
+logger = get_logger(name=__name__)
 
 tender_compliance_router = APIRouter(prefix="/api/tender/compliance", tags=["标书合规 "])
 

@@ -12,6 +12,10 @@ import requests
 from apps import AppContext
 from apps.document_parser.base import HDocument, HFiledocument
 from apps.repository.entity.file_entity import FileRecordEntity
+from logger_config import get_logger, setup_logging
+
+setup_logging()
+logger = get_logger(name=__name__)
 
 
 class BaseParser(ABC):
@@ -266,8 +270,11 @@ class BaseParser(ABC):
             with open(file_path, "rb") as f:
                 files = {"files": f}
                 res = requests.post(url, files=files, data=data)
+                if res.status_code != 200:
+                    raise Exception(f"_mineru266 接口异常: {res.text}")
+                logger.info(f"_mineru266 接口返回: {res.text}")
                 item = res.json()
-                print(f"_mineru266 解析结果{item}")
+                logger.info(f"_mineru266 解析结果{item}")
                 for k1 in item["results"]:
                     text = item["results"][k1]["md_content"]
                     images = item["results"][k1]["images"]
@@ -276,8 +283,11 @@ class BaseParser(ABC):
         else:
             files = {"files": data_stream}
             res = requests.post(url, files=files, data=data)
+            if res.status_code != 200:
+                raise Exception(f"_mineru266 接口异常: {res.text}")
+            logger.info(f"_mineru266 接口返回: {res.text}")
             item = res.json()
-            print(f"_mineru266 解析结果{item}")
+            logger.info(f"_mineru266 解析结果{item}")
             for k1 in item["results"]:
                 text = item["results"][k1]["md_content"]
                 images = item["results"][k1]["images"]

@@ -123,32 +123,37 @@ async def handle_rule(rule: TenderRuleConfiguration,
     result = run_skill_by_name(
         app_context.agent_model,
         rule.skill_name,
-        instruction_params={"bid_id": tender_file_id},
+        instruction_params={"bid_id": tender_file_id, "rule_id": rule.id},
     )
+    logger.info(f"标书 {tender_file_id} 规则 {rule.id} 结果：{result}")
     result_list: SkillComplianceListFormat = result["structured_response"]
     print(f"handle_rule: result-{result}")
+    if result_list.result_type !=0:
+        # 将结果写入数据库
+        with app_context.db_session_factory() as session:
+            risk_records = []
+            for item in result_list.items:
+                # is_compliant为False表示有风险（is_risk=1），为True表示无风险（is_risk=0）
+                is_risk = 0 if item.is_compliant else 1
 
-    # 将结果写入数据库
-    with app_context.db_session_factory() as session:
-        risk_records = []
-        for item in result_list.items:
-            # is_compliant为False表示有风险（is_risk=1），为True表示无风险（is_risk=0）
-            is_compliant_value = 1 if item.is_compliant else 0
+                is_compliant_value = 1 if item.is_compliant else 0
 
-            risk_record = TenderComplianceRiskRecord(
-                sub_compliance_check_task_id=sub_compliance_check_task_id,
-                tender_file_id=tender_file_id,
-                bid_plagiarism_check_task_id=bid_plagiarism_check_task_id,
-                check_basis=item.check_basis,
-                page_number=item.page_number if hasattr(item, 'page_number') else None,
-                is_compliant=is_compliant_value,
-                rule_id=rule.id
-            )
-            risk_records.append(risk_record)
-        
-        if risk_records:
-            session.add_all(risk_records)
-            session.commit()
+                risk_record = TenderComplianceRiskRecord(
+                    sub_compliance_check_task_id=sub_compliance_check_task_id,
+                    tender_file_id=tender_file_id,
+                    bid_plagiarism_check_task_id=bid_plagiarism_check_task_id,
+                    risk_description=item.check_basis,
+                    is_risk=is_risk,
+                    check_basis=item.check_basis,
+                    page_number=item.page_number if hasattr(item, 'page_number') else None,
+                    is_compliant=is_compliant_value,
+                    rule_id=rule.id
+                )
+                risk_records.append(risk_record)
+
+            if risk_records:
+                session.add_all(risk_records)
+                session.commit()
     return result
 
 

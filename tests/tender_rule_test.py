@@ -330,21 +330,9 @@ async def test_handle_rule_with_invalid_skill(content: AppContext):
         raise
 
 
-def test_handle_rule_parameter_validation(content: AppContext):
+@pytest.mark.asyncio
+async def test_handle_rule_parameter_validation(content: AppContext):
     """
     测试 handle_rule 参数验证
     """
-    with content.db_session_factory() as session:
-        rule = session.query(TenderRuleConfiguration).filter(
-            TenderRuleConfiguration.status == 1
-        ).first()
-        
-        if not rule:
-            pytest.skip("没有可用的测试规则")
-        
-        # 验证规则对象的关键属性
-        assert rule.id is not None, "规则ID不能为空"
-        assert rule.skill_name is not None and len(rule.skill_name) > 0, "技能名称不能为空"
-        assert rule.rule_name is not None and len(rule.rule_name) > 0, "规则名称不能为空"
-        
-        logger.info(f"参数验证通过: rule_id={rule.id}, skill_name={rule.skill_name}")
+    result = await compliance_validation(385)

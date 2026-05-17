@@ -14,7 +14,10 @@ from apps.service.tender_service import bid_plagiarism_check, get_tender_task_li
     batch_update_tender_similarity_info
 from apps.web.dto.tender_task import TenderTaskDto, TenderConditionDto, BasePageDto, TenderSimilarityDto, BatchIds
 from apps.web.vo.similarity_respose import BaseResponse
+from logger_config import get_logger, setup_logging
 
+setup_logging()
+logger = get_logger(name=__name__)
 tender_router = APIRouter(prefix="/api/tender", tags=["标书"])
 
 

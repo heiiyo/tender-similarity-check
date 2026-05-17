@@ -9,7 +9,8 @@ from langchain_core.tools import tool
 
 from agent.skill.skill import SkillContent, SkillDetail
 from apps import AppContext
-from apps.repository.entity.tender_entity import TenderTopic, TenderPDFImageEntity
+from apps.repository.entity.tender_entity import TenderTopic, TenderPDFImageEntity, SubBidPlagiarismCheckTask, \
+    SubComplianceCheckTask, TenderComplianceRiskRecord
 from apps.repository.entity.file_entity import FileRecordEntity
 
 from logger_config import get_logger
@@ -127,38 +128,38 @@ async def detect_seal_for_page(page_number, file_id, model, bid_id):
 
             seal_count = 0
             detected_text = ""
-            
+            logger.info(f"第{page_number}页，检测结果：{results}")
             # 处理检测结果
             for result in results:
                 boxes = result.boxes
                 if len(boxes) > 0:
                     for box in boxes:
                         seal_count += 1
-                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().tolist()
-
-                        # 使用PIL截图印章部分用于OCR识别
-                        crop_box = (
-                            max(0, int(x1)),
-                            max(0, int(y1)),
-                            min(image.width, int(x2)),
-                            min(image.height, int(y2))
-                        )
-
-                        # 裁剪印章区域
-                        seal_img = image.crop(crop_box)
-
-                        # 转换为字节流用于OCR
-                        seal_img_buffer = io.BytesIO()
-                        seal_img.save(seal_img_buffer, format='PNG')
-                        seal_img_bytes = seal_img_buffer.getvalue()
-
-                        # OCR识别（同步操作，放入线程池）
-                        base64_str = base64.b64encode(seal_img_bytes).decode("utf-8")
-                        from agent.model.orc import scan_orc_content
-                        detected_text = await loop.run_in_executor(
-                            None,
-                            lambda: scan_orc_content(base64_str, prompt_text="识别公章内容")
-                        )
+                        # x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().tolist()
+                        #
+                        # # 使用PIL截图印章部分用于OCR识别
+                        # crop_box = (
+                        #     max(0, int(x1)),
+                        #     max(0, int(y1)),
+                        #     min(image.width, int(x2)),
+                        #     min(image.height, int(y2))
+                        # )
+                        #
+                        # # 裁剪印章区域
+                        # seal_img = image.crop(crop_box)
+                        #
+                        # # 转换为字节流用于OCR
+                        # seal_img_buffer = io.BytesIO()
+                        # seal_img.save(seal_img_buffer, format='PNG')
+                        # seal_img_bytes = seal_img_buffer.getvalue()
+                        #
+                        # # OCR识别（同步操作，放入线程池）
+                        # base64_str = base64.b64encode(seal_img_bytes).decode("utf-8")
+                        # from agent.model.orc import scan_orc_content
+                        # detected_text = await loop.run_in_executor(
+                        #     None,
+                        #     lambda: scan_orc_content(base64_str, prompt_text="识别公章内容")
+                        # )
                         
             # 构建结果
             item_result = {
@@ -181,12 +182,60 @@ async def detect_seal_for_page(page_number, file_id, model, bid_id):
         }
 
 
+def save_compliance_risk_records(
+        tender_file_id: int,
+        rule_id: int,
+        result_list
+):
+    """
+    保存合规检测风险记录到数据库
+
+    :param tender_file_id: 标书文件ID
+    :param rule_id: 规则ID
+    :param result_list: 检测结果列表，包含items属性，每个item包含check_basis、page_number、is_compliant等字段
+    """
+    try:
+        app_context = AppContext()
+
+        with app_context.db_session_factory() as session:
+            sub_task: SubComplianceCheckTask = session.query(SubComplianceCheckTask).filter(
+                SubComplianceCheckTask.tender_file_id == tender_file_id
+            ).first()
+            risk_records = []
+
+            # 遍历检测结果，创建风险记录
+            for item in result_list:
+                # is_compliant为False表示有风险（不合规），为True表示无风险（合规）
+                # 数据库中：1-合规；0-不合规
+                is_compliant_value = 1 if item.get("is_sign", 0) else 0
+
+                risk_record = TenderComplianceRiskRecord(
+                    sub_compliance_check_task_id=sub_task.id,
+                    tender_file_id=tender_file_id,
+                    bid_plagiarism_check_task_id=sub_task.bid_plagiarism_check_task_id,
+                    check_basis=item.get("check_basis", ""),
+                    page_number=item.get("page_number", 0),
+                    is_compliant=is_compliant_value,
+                    rule_id=rule_id
+                )
+                risk_records.append(risk_record)
+
+            # 批量插入数据库
+            if risk_records:
+                session.add_all(risk_records)
+                session.commit()
+                logger.info(f"成功保存 {len(risk_records)} 条合规风险记录")
+    except Exception as e:
+        logger.error(f"保存合规风险记录失败: {str(e)}", exc_info=True)
+        raise
+
 @tool
-def check_official_seal(bid_id):
+def check_official_seal(bid_id: int, rule_id: int):
     """
     用于检测标书是否盖有公章，根据标书id检测标书每一页的盖章情况
     
     :param bid_id: 要检测的标书的唯一数字ID（tender_file_id）。
+    :param rule_id: 对应的规则id。
     :return: 一个字典列表，每个元素代表一页的检测结果，包含：
              - page_number (int): 页码
              - is_sign (bool): 是否检测到公章
@@ -221,7 +270,7 @@ def check_official_seal(bid_id):
             # 提前提取需要的字段，避免传递整个ORM对象
             page_tasks_data = [
                 {"page_number": record.page_number, "file_id": record.file_id}
-                for record in image_records[0:4]
+                for record in image_records
             ]
             
             logger.info(f"标书 {bid_id} 共有 {len(page_tasks_data)} 页需要检测")
@@ -266,8 +315,12 @@ def check_official_seal(bid_id):
         # 运行异步任务
         out_results = asyncio.run(run_concurrent_detection())
         
-        logger.info(f"标书 {bid_id} 公章检测完成，共检测 {len(out_results)} 页")
-        return out_results
+        logger.info(f"标书 {bid_id} 公章检测完成，共检测 {out_results} ")
+        save_compliance_risk_records(bid_id, rule_id, out_results)
+        return {
+                "is_sign": True,
+                "text": f"检测完毕"
+            }
     
     except Exception as e:
         logger.error(f"标书 {bid_id} 公章检测整体失败: {str(e)}", exc_info=True)

@@ -7,6 +7,10 @@ from apps import AppContext
 from apps.document_parser.base import HFiledocument, HDocument
 from apps.document_parser.base_parser import BaseParser
 from apps.repository.entity.tender_entity import TenderPDFImageEntity
+from logger_config import get_logger, setup_logging
+
+setup_logging()
+logger = get_logger(name=__name__)
 
 
 class MarkDownParser(BaseParser):
@@ -110,7 +114,7 @@ class MarkDownParser(BaseParser):
             # 帮我讲text存储到数据库中，并返回给用户，
             return self._handle_mineru_data(content_list, file_id)
         except Exception as e:
-            raise ValueError(f"标书PDF解析失败：{str(e)}")
+            raise ValueError(f"标书PDF解析失败：{e}")
 
     def _handle_mineru_data_test(self, content_list, file_id) -> HFiledocument:
         """

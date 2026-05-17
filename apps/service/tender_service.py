@@ -27,9 +27,10 @@ from apps.service.tender_compliance_service import create_compliance_check_task_
 from apps.web.dto.tender_task import TenderTaskDto, TenderConditionDto, BasePageDto, TenderSimilarityDto
 from apps.web.vo.similarity_respose import TenderTaskPage, format_datetime, TenderSimilarityVO, FileRecordVO, TaskDataVO
 
-from logger_config import get_logger
+from logger_config import get_logger, setup_logging
 
-logger = get_logger(name=__package__)
+setup_logging()
+logger = get_logger(name=__name__)
 
 app_context = AppContext()
 
@@ -113,9 +114,9 @@ def bid_plagiarism_check(tender_task_dto: TenderTaskDto, background_tasks: Backg
     """
     task_id = None
     tender_file_list = None
-    if tender_task_dto.task_type == 1:
+    if tender_task_dto.check_type == 1:
         tender_file_list, task_id = create_plagiarism_check_tasks(tender_task_dto)
-    elif tender_task_dto.task_type == 2:
+    elif tender_task_dto.check_type == 2:
         task_id = create_compliance_check_task_record(tender_task_dto)
     else:
         return

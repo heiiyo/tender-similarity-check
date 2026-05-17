@@ -4,7 +4,10 @@ from fastapi import APIRouter, UploadFile, Form, File
 
 from apps.service.file_service import upload_file, upload_skill_zip
 from apps.web.vo.similarity_respose import BaseResponse
+from logger_config import get_logger, setup_logging
 
+setup_logging()
+logger = get_logger(name=__name__)
 file_router = APIRouter(prefix="/api/file", tags=["文件"])
 
 

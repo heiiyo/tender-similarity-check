@@ -49,7 +49,12 @@ class SkillComplianceFormat(BaseModel):
 
 class SkillComplianceListFormat(BaseModel):
     """技能执行后的多条合规结论（分页、分项或多检查点时使用）。"""
-
+    skill_name: str = Field(
+        description="技能名称， 用于标识是哪个skill在执行",
+    )
+    result_type: str = Field(
+        description="结果类型，用于标识是哪类结果",
+    )
     items: list[SkillComplianceFormat] = Field(
         description=(
             "合规判定条目列表，每项结构与 SkillComplianceFormat 相同。"
