@@ -612,7 +612,8 @@ async def parser_tender_topic(tender_file_id):
             .order_by(TenderPDFImageEntity.page_number.asc()).all()
         context = ""
         for image in tender_pdf_image_list:
-            context += image.page_context
+            if image.page_context:
+                context += image.page_context
         agent_model = AppContext().agent_model
         agent = create_agent(
             agent_model,
@@ -640,7 +641,6 @@ async def parser_tender_topic(tender_file_id):
 
 def parser_document(tender_file_id):
     logger.info(f"解析标书-{tender_file_id}开始")
-    print(f"解析标书-{tender_file_id}开始")
     with app_context.db_session_factory() as session:
         file_record = session.get(FileRecordEntity, tender_file_id)
         file_path = file_record.file_path

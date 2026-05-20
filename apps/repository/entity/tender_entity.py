@@ -61,6 +61,7 @@ class TenderComplianceRiskRecord(Base):
     page_number = Column(Integer, comment="标书对应的页码")
     is_compliant = Column(Integer, default=1, comment="1-合规；0-不合规")
     rule_id = Column(Integer, comment="规则id")
+    confidence = Column(Float, comment="算法自信度")
 
 
 class DocumentSimilarityRecord(Base):

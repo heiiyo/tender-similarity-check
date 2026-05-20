@@ -12,8 +12,9 @@ from apps import AppContext
 from apps.repository.entity.file_entity import FileRecordEntity
 from apps.repository.entity.tender_entity import TenderPDFImageEntity
 from apps.repository.minio_repository import get_file_url
-from logger_config import get_logger
+from logger_config import get_logger, setup_logging
 
+setup_logging()
 logger = get_logger(name=__package__)
 
 app_context = AppContext()
@@ -23,9 +24,9 @@ _executor = ThreadPoolExecutor(max_workers=20)
 
 
 async def task_upload(file_bytes, file_type, business_id, page_number, tender_file_id):
-    print(f"task_upload 开始时间- {datetime.datetime.now()}")
+    logger.info(f"task_upload 开始时间- {datetime.datetime.now()}")
     file_id, url = await upload_file_bytes(file_bytes, file_type, business_id)
-    print(f"task_upload 结束时间- {datetime.datetime.now()}")
+    logger.info(f"task_upload 结束时间- {datetime.datetime.now()}")
     with app_context.db_session_factory() as session:
         tender_pdf_image_entity = TenderPDFImageEntity(
             file_id=file_id,
@@ -96,7 +97,7 @@ async def upload_file_bytes(file_bytes, file_type, business_id):
 
     # ⭐ 关键步骤：在线程池中运行阻塞逻辑
     file_id, url = await loop.run_in_executor(_executor, _blocking_upload_logic, file_bytes, file_type, business_id)
-    print(f"✅ Task Finished: {file_id}, {url}")
+    logger.info(f"✅ Task Finished: {file_id}, {url}")
     return file_id, url
 
 

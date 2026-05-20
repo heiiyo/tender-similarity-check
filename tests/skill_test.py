@@ -14,7 +14,9 @@ from agent.skill.skill_runner import (
     route_user_request,
     run_skill_by_name,
 )
-from agent.tools.tender_base_tool import check_official_seal, check_tender_signature
+from agent.tools.tender_base_tool import check_official_seal, check_tender_signature, query_tender_topic, \
+    query_tender_keyword
+
 
 @pytest.fixture
 def context():
@@ -39,12 +41,22 @@ def model():
     )
 
 
-def test_check_official_seal_tool():
+def test_check_official_seal_tool(context):
     """检测盖章单元测试"""
     tool: BaseTool = check_official_seal
-    result = tool.invoke({"bid_id": 1})
+    result = tool.invoke({"bid_id": 1, "rule_id": 1})
     print(result)
     assert len(result) == 4
+
+def test_query_tender_topic(context):
+    tool: BaseTool = query_tender_topic
+    result = tool.invoke({"bid_id": 1, "keyword": "技术标"})
+    print(result)
+
+def test_query_tender_keyword(context):
+    tool: BaseTool = query_tender_keyword
+    result = tool.invoke({"bid_id": 1, "keyword": "法定代表人或被授权人"})
+    print(result)
 
 
 def test_read_skills(skill_registry: SkillRegistry):

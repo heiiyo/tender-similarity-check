@@ -239,7 +239,7 @@ class BaseParser(ABC):
             doc.close()
         return pages
 
-    async def to_images(self, tender_file_id, zoom=3.0):
+    async def to_images(self, tender_file_id, zoom=1.5):
         """
         使用 PyMuPDF 快速转换 PDF 为图片
         :param tender_file_id 标书文件id

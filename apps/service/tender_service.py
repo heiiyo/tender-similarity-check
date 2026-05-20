@@ -143,10 +143,10 @@ def run_tender_check_pipeline(
     logger.info("流水线开始: 解析标书 file_ids=%s", tender_task_dto.file_ids)
     run_tender_file_parser_background(tender_task_dto.file_ids)
 
-    if tender_task_dto.task_type == 1:
+    if tender_task_dto.check_type == 1:
         logger.info("流水线: 查重检测 task_id=%s", task_id)
         start_plagiarism_check(tender_file_list, tender_task_dto.tender_reference_id)
-    elif tender_task_dto.task_type == 2:
+    elif tender_task_dto.check_type == 2:
         logger.info("流水线: 合规检测 task_id=%s", task_id)
         asyncio.run(run_compliance_checks_task(tender_task_dto.file_ids, task_id))
 
@@ -167,6 +167,7 @@ async def tender_file_parser_task(tender_file_ids: List[int]):
 
     async def process_single(file_id: int):
         async with semaphore:
+            logger.info("开始解析 file_id=%s", file_id)
             md_parser = MarkDownParser()
             await md_parser.to_images(tender_file_id=file_id)
             documents = await asyncio.to_thread(parser_document, file_id)

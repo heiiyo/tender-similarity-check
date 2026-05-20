@@ -41,7 +41,7 @@ orc_model:
   api_key: sk-sdbwgllpqhbnijbotgyqsikuhowhmmuzpowxraulvasfexsv
 
 mineru:
-  url: http://dev.datamatrixai.com:30365/file_parse
+  url: https://uu872443-9142-d8f3a5ba.bjb2.seetacloud.com:8443/file_parse
   data:
     # server_url: http://vllm-server:8000
     backend: hybrid-auto-engine
