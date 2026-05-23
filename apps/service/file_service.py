@@ -1,6 +1,8 @@
 import asyncio
+import base64
 import datetime
 import os
+import re
 import tempfile
 import uuid
 import zipfile
@@ -421,4 +423,317 @@ def upload_skill_zip(file) -> dict:
             logger.error(result["error_message"])
     
     return result
+
+
+def is_scanned_pdf(file_path: str) -> bool:
+    """
+    判断PDF是否为扫描件
+    :param file_path: PDF文件路径
+    :return: True表示是扫描件，False表示是文本PDF
+    """
+    try:
+        import fitz
+
+        doc = fitz.open(file_path)
+        if doc.is_encrypted:
+            logger.warning("PDF文件被加密")
+            return False
+
+        total_chars = 0
+        sample_pages = min(3, len(doc))
+
+        for page_num in range(sample_pages):
+            page = doc[page_num]
+            text = page.get_text()
+            total_chars += len(text.strip())
+
+            if len(text.strip()) > 200:
+                doc.close()
+                return False
+
+        doc.close()
+        threshold = 50
+        return total_chars < threshold
+
+    except Exception as e:
+        logger.error(f"判断PDF类型失败: {str(e)}", exc_info=True)
+        return False
+
+
+def pdf_page_to_image(file_path: str, page_number: int = 0, dpi: int = 200) -> bytes:
+    """
+    将PDF指定页转换为图片
+    :param file_path: PDF文件路径
+    :param page_number: 页码（从0开始）
+    :param dpi: 分辨率
+    :return: PNG图片的字节数据
+    """
+    try:
+        import fitz
+
+        doc = fitz.open(file_path)
+        if page_number >= len(doc):
+            raise ValueError(f"页码 {page_number} 超出范围，文档共 {len(doc)} 页")
+
+        page = doc[page_number]
+        zoom = dpi / 72
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat)
+
+        img_bytes = pix.tobytes("png")
+        doc.close()
+
+        return img_bytes
+
+    except Exception as e:
+        logger.error(f"PDF转图片失败: {str(e)}", exc_info=True)
+        raise
+
+
+def ocr_extract_text_from_image(image_bytes: bytes) -> str:
+    """
+    使用OCR从图片中提取文本
+    :param image_bytes: 图片字节数据
+    :return: 识别出的文本
+    """
+    try:
+        from agent.model.orc import scan_orc_content
+
+        base64_str = base64.b64encode(image_bytes).decode("utf-8")
+        prompt_text = "请识别图片中的所有文字内容，保持原有格式。如果是标题或大字号文字，请特别标注。"
+
+        result = scan_orc_content(base64_str, prompt_text)
+
+        if result and isinstance(result, str):
+            return result.strip()
+
+        return ""
+
+    except Exception as e:
+        logger.error(f"OCR识别失败: {str(e)}", exc_info=True)
+        return ""
+
+
+def extract_project_name_from_first_page(file_path: str, mime_type: str) -> str:
+    """
+    从文件第一页提取项目名称（大标题）
+    :param file_path: 文件路径
+    :param mime_type: 文件类型 (pdf, docx, doc等)
+    :return: 项目名称字符串
+    """
+    try:
+        if mime_type.lower() in ['pdf']:
+            return _extract_project_name_from_pdf(file_path)
+        elif mime_type.lower() in ['docx', 'doc']:
+            return _extract_project_name_from_docx(file_path)
+        else:
+            logger.warning(f"不支持的文件类型: {mime_type}")
+            return ""
+    except Exception as e:
+        logger.error(f"提取项目名称失败: {str(e)}", exc_info=True)
+        return ""
+
+
+def _extract_project_name_from_pdf(file_path: str) -> str:
+    """
+    从PDF文件第一页提取项目名称
+    策略：
+    1. 先判断是否为扫描件
+    2. 如果是文本PDF，查找字体最大的文本作为标题
+    3. 如果是扫描件，使用OCR识别后提取最大字号的文本
+    """
+    try:
+        import fitz
+
+        is_scanned = is_scanned_pdf(file_path)
+        logger.info(f"PDF文件类型判断: {'扫描件' if is_scanned else '文本PDF'}")
+
+        if is_scanned:
+            logger.info("检测到扫描件PDF，使用OCR识别第一页")
+            return _extract_project_name_from_scanned_pdf(file_path)
+
+        doc = fitz.open(file_path)
+        if len(doc) == 0:
+            return ""
+
+        first_page = doc[0]
+        blocks = first_page.get_text("dict")["blocks"]
+
+        max_font_size = 0
+        title_text = ""
+
+        for block in blocks:
+            if "lines" not in block:
+                continue
+
+            for line in block["lines"]:
+                for span in line["spans"]:
+                    font_size = span.get("size", 0)
+                    text = span.get("text", "").strip()
+
+                    if text and font_size > max_font_size and len(text) > 2:
+                        max_font_size = font_size
+                        title_text = text
+
+        doc.close()
+
+        if title_text:
+            title_text = re.sub(r'\s+', ' ', title_text).strip()
+            logger.info(f"从PDF提取的项目名称: {title_text}")
+            return title_text
+
+        return ""
+
+    except Exception as e:
+        logger.error(f"PDF项目名称提取失败: {str(e)}", exc_info=True)
+        return ""
+
+
+def _extract_project_name_from_scanned_pdf(file_path: str) -> str:
+    """
+    从扫描版PDF第一页提取项目名称（使用OCR）
+    :param file_path: PDF文件路径
+    :return: 项目名称
+    """
+    try:
+        logger.info("开始将PDF第一页转换为图片")
+        image_bytes = pdf_page_to_image(file_path, page_number=0, dpi=300)
+
+        logger.info("开始OCR识别")
+        ocr_text = ocr_extract_text_from_image(image_bytes)
+
+        if not ocr_text:
+            logger.warning("OCR识别结果为空")
+            return ""
+
+        logger.info(f"OCR识别结果长度: {len(ocr_text)} 字符")
+
+        lines = ocr_text.split('\n')
+
+        max_length = 0
+        title_text = ""
+
+        for line in lines:
+            line = line.strip()
+            if not line or len(line) < 3:
+                continue
+
+            if len(line) > max_length and len(line) < 100:
+                max_length = len(line)
+                title_text = line
+
+        if title_text:
+            title_text = re.sub(r'\s+', ' ', title_text).strip()
+            logger.info(f"从扫描PDF提取的项目名称: {title_text}")
+            return title_text
+
+        return ""
+
+    except Exception as e:
+        logger.error(f"扫描PDF项目名称提取失败: {str(e)}", exc_info=True)
+        return ""
+
+
+def _extract_project_name_from_docx(file_path: str) -> str:
+    """
+    从Word文档第一页提取项目名称
+    策略：查找第一个大字号或加粗的段落作为标题
+    """
+    try:
+        from docx import Document
+
+        doc = Document(file_path)
+
+        max_font_size = 0
+        title_text = ""
+
+        for paragraph in doc.paragraphs:
+            if not paragraph.text or not paragraph.text.strip():
+                continue
+
+            text = paragraph.text.strip()
+
+            if len(text) < 3:
+                continue
+
+            font_size = 0
+            is_bold = False
+
+            if paragraph.runs:
+                for run in paragraph.runs:
+                    if run.font.size and run.font.size.pt:
+                        font_size = max(font_size, run.font.size.pt)
+                    if run.bold:
+                        is_bold = True
+
+            if (font_size > max_font_size and len(text) > 5) or \
+                    (is_bold and font_size > 14 and len(text) > 5):
+                max_font_size = font_size
+                title_text = text
+
+                if font_size >= 16:
+                    break
+
+        if title_text:
+            title_text = re.sub(r'\s+', ' ', title_text).strip()
+            logger.info(f"从Word提取的项目名称: {title_text}")
+            return title_text
+
+        return ""
+
+    except ImportError:
+        logger.error("未安装python-docx库，无法解析Word文档")
+        return ""
+    except Exception as e:
+        logger.error(f"Word项目名称提取失败: {str(e)}", exc_info=True)
+        return ""
+
+
+def upload_file_with_project_name(files, business_id) -> List[dict]:
+    """
+    上传文件并提取项目名称
+    :param files: 文件集合
+    :param business_id: 业务id
+    :return: 包含文件ID和项目名称的列表
+    """
+    result_list = []
+
+    for file in files:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_path = os.path.join(tmp_dir, file.filename)
+            with open(file_path, "wb") as f:
+                f.write(file.file.read())
+
+            p = Path(file_path)
+            uuid_str = uuid.uuid4().hex
+            file_type = p.suffix[1:] if p.suffix else ""
+
+            minio_client.fput_object(
+                bucket_name=app_context.minio_config["bucket_name"],
+                object_name=f"files/{business_id}/{uuid_str}.{file_type}",
+                file_path=file_path,
+                content_type=file.content_type
+            )
+
+            file_record = FileRecordEntity(
+                file_size=p.stat().st_size,
+                mime_type=file_type,
+                file_name=file.filename,
+                file_path=f"files/{business_id}/{uuid_str}.{file_type}",
+                business_id=business_id,
+            )
+
+            with app_context.db_session_factory() as session:
+                session.add(file_record)
+                session.commit()
+                file_id = file_record.id
+
+            project_name = extract_project_name_from_first_page(file_path, file_type)
+
+            result_list.append({
+                "file_id": file_id,
+                "project_name": project_name
+            })
+
+    return result_list
 

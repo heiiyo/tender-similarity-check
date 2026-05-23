@@ -1,1 +1,0 @@
-print("欢迎执行script.py")

@@ -11,7 +11,7 @@ from apps.service.file_service import upload_file_bytes
 from apps.service.tender_service import bid_plagiarism_check, get_tender_task_list, get_tender_sub_task_list, \
     get_tender_similarity_info, get_tender_similarity_info_by_file_id, delete_tender_task_by_task_id, \
     export_similarity_report, export_similarity_report_task_id, update_tender_similarity_info, \
-    batch_update_tender_similarity_info
+    batch_update_tender_similarity_info, batch_delete_tender_tasks
 from apps.web.dto.tender_task import TenderTaskDto, TenderConditionDto, BasePageDto, TenderSimilarityDto, BatchIds
 from apps.web.vo.similarity_respose import BaseResponse
 from logger_config import get_logger, setup_logging
@@ -122,4 +122,33 @@ async def export_similarity_report_by_sub_task_id(sub_task_id):
 def delete_tender_task(task_id):
     delete_tender_task_by_task_id(task_id)
     return BaseResponse.success()
+
+
+@tender_router.post("/batch_delete_tender_task", response_model=BaseResponse)
+async def batch_delete_tender_task(task_ids: BatchIds):
+    """
+    批量删除标书任务
+
+    :param task_ids: 任务ID列表
+    :return: 删除结果统计
+    """
+    if not task_ids.task_ids:
+        return BaseResponse.error(message="任务ID列表不能为空")
+
+    try:
+        result = await asyncio.to_thread(batch_delete_tender_tasks, task_ids.task_ids)
+
+        if result["failed_count"] > 0:
+            return BaseResponse.success(
+                message=f"批量删除完成：成功 {result['success_count']} 个，失败 {result['failed_count']} 个",
+                data=result
+            )
+
+        return BaseResponse.success(
+            message=f"成功删除 {result['success_count']} 个任务",
+            data=result
+        )
+    except Exception as e:
+        logger.error(f"批量删除任务失败: {str(e)}", exc_info=True)
+        return BaseResponse.error(message=f"批量删除失败: {str(e)}")
 

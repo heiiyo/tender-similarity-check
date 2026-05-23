@@ -6,9 +6,12 @@ import time
 from io import BytesIO
 from typing import List
 
+from openpyxl import Workbook
+
 from anyio import Path
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from sqlalchemy import or_
 from sqlalchemy.sql.operators import and_
 
@@ -345,8 +348,11 @@ def query_tender_compliance_info(compliance_info_condition: ComplianceInfoCondit
                          TenderComplianceRiskRecord.is_compliant == 0)) \
             .count()
 
+        sub_task: SubComplianceCheckTask = session.query(SubComplianceCheckTask).filter(
+            SubComplianceCheckTask.tender_file_id == compliance_info_condition.tender_id).first()
+
         sub_task_list = session.query(SubComplianceCheckTask).filter(
-            SubComplianceCheckTask.tender_file_id == compliance_info_condition.tender_id).all()
+            SubComplianceCheckTask.bid_plagiarism_check_task_id == sub_task.bid_plagiarism_check_task_id).all()
 
         file_record_top: FileRecordEntity = session.get(FileRecordEntity, compliance_info_condition.tender_id)
         file_record_list = []
@@ -387,7 +393,8 @@ def query_tender_compliance_info(compliance_info_condition: ComplianceInfoCondit
                 compliance_item = SkillComplianceFormat(
                     is_compliant=(record.is_compliant == 0),  # is_compliant=0 表示合规
                     page_number=record.page_number if record.page_number else 0,
-                    check_basis=record.check_basis if record.check_basis else ""
+                    check_basis=record.check_basis if record.check_basis else "",
+                    confidence_level = record.confidence if record.confidence else 1.0
                 )
                 compliance_list.append(compliance_item)
 
@@ -414,7 +421,8 @@ def query_tender_compliance_info(compliance_info_condition: ComplianceInfoCondit
         tender_url=get_file_url(file_record_top.file_path),
         risk_number=risk_number,
         passed_number=passed_number,
-        tender_list=file_record_list
+        tender_list=file_record_list,
+        sub_task_id=sub_task.id
     )
     return page
 
@@ -459,7 +467,8 @@ def get_compliance_info(compliance_info_condition: ComplianceInfoConditionDto) -
                 compliance_item = SkillComplianceFormat(
                     is_compliant=(record.is_compliant == 1),  # is_compliant=1 表示合规
                     page_number=record.page_number if record.page_number else 0,
-                    check_basis=record.check_basis if record.check_basis else ""
+                    check_basis=record.check_basis if record.check_basis else "",
+                    confidence_level = record.confidence if record.confidence else 1.0
                 )
                 compliance_list.append(compliance_item)
 
@@ -753,3 +762,192 @@ def insert_into_milvus(tender_file_id, topics, documents: HFiledocument):
     milvus_vector_db.insert_info([file_ids, pages, start_index_list, texts, vec_lis, topics])
     logger.info(f"标书-{tender_file_id}向量化入库结束")
     return data_list
+
+
+def export_compliance_risk_records_to_excel(sub_compliance_check_task_id: int) -> BytesIO:
+    """
+    导出合规检测风险记录为 Excel
+
+    :param sub_compliance_check_task_id: 合规子任务ID
+    :return: Excel 文件的 BytesIO 对象
+    """
+    try:
+        # 1. 查询合规子任务信息
+        with app_context.db_session_factory() as session:
+            sub_task = session.get(SubComplianceCheckTask, sub_compliance_check_task_id)
+            if not sub_task:
+                raise ValueError(f"合规子任务 {sub_compliance_check_task_id} 不存在")
+
+            # 2. 查询该子任务的所有风险记录
+            risk_records = session.query(TenderComplianceRiskRecord).filter(
+                TenderComplianceRiskRecord.sub_compliance_check_task_id == sub_compliance_check_task_id
+            ).order_by(TenderComplianceRiskRecord.rule_id, TenderComplianceRiskRecord.page_number).all()
+
+            if not risk_records:
+                raise ValueError(f"合规子任务 {sub_compliance_check_task_id} 没有风险记录")
+
+            # 3. 获取所有涉及的规则ID
+            rule_ids = list(set(record.rule_id for record in risk_records if record.rule_id))
+
+            # 4. 查询规则信息
+            rules_dict = {}
+            if rule_ids:
+                rules = session.query(TenderRuleConfiguration).filter(
+                    TenderRuleConfiguration.id.in_(rule_ids)
+                ).all()
+                rules_dict = {rule.id: rule for rule in rules}
+
+        # 5. 按规则分组（保持顺序）
+        grouped_records = {}
+        rule_order = []
+        for record in risk_records:
+            rule_id = record.rule_id
+            if rule_id not in grouped_records:
+                rule_info = rules_dict.get(rule_id)
+                rule_name = rule_info.rule_name if rule_info else f"未知规则 (ID: {rule_id})"
+                grouped_records[rule_id] = {
+                    'rule_name': rule_name,
+                    'records': []
+                }
+                rule_order.append(rule_id)
+
+            # 转换 is_compliant 为文字
+            compliant_text = "合规" if record.is_compliant == 1 else "不合规"
+
+            grouped_records[rule_id]['records'].append({
+                'page_number': record.page_number,
+                'check_basis': record.check_basis,
+                'is_compliant': compliant_text,
+                'confidence': record.confidence
+            })
+
+        # 6. 创建 Excel 工作簿
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "合规检测结果"
+
+        # 7. 定义表头
+        headers = ["规则名称", "页码", "检查依据", "是否合规", "置信度"]
+
+        # 8. 定义不同规则的配色方案（使用柔和的颜色）
+        color_schemes = [
+            {"fill": "E3F2FD", "font": "1565C0"},  # 蓝色
+            {"fill": "F3E5F5", "font": "6A1B9A"},  # 紫色
+            {"fill": "E8F5E9", "font": "2E7D32"},  # 绿色
+            {"fill": "FFF3E0", "font": "EF6C00"},  # 橙色
+            {"fill": "FCE4EC", "font": "C2185B"},  # 粉色
+            {"fill": "E0F2F1", "font": "00695C"},  # 青色
+            {"fill": "FBE9E7", "font": "D84315"},  # 深橙
+            {"fill": "F1F8E9", "font": "558B2F"},  # 浅绿
+        ]
+
+        # 定义边框样式
+        thin_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+
+        # 9. 写入数据
+        current_row = 1
+
+        # 先写入总表头
+        header_font = Font(bold=True, size=11, color="FFFFFF")
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center")
+
+        for col_idx, header in enumerate(headers, 1):
+            cell = ws.cell(row=current_row, column=col_idx, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
+
+        current_row += 1
+
+        # 遍历每个规则组
+        for idx, rule_id in enumerate(rule_order):
+            group_data = grouped_records[rule_id]
+            rule_name = group_data['rule_name']
+            records = group_data['records']
+
+            # 选择颜色方案（循环使用）
+            color_scheme = color_schemes[idx % len(color_schemes)]
+
+            # 定义该组的背景色和字体色
+            group_fill = PatternFill(start_color=f"FF{color_scheme['fill']}", end_color=f"FF{color_scheme['fill']}",
+                                     fill_type="solid")
+            group_font_color = f"FF{color_scheme['font']}"
+
+            # 计算该规则占用的行数
+            rule_row_count = len(records)
+            start_merge_row = current_row
+            end_merge_row = current_row + rule_row_count - 1
+
+            # 写入数据行
+            data_alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+            center_alignment = Alignment(horizontal="center", vertical="center")
+
+            for row_offset, record in enumerate(records):
+                current_data_row = current_row + row_offset
+
+                # 规则名称列（只在第一行写入，后续合并）
+                if row_offset == 0:
+                    rule_cell = ws.cell(row=current_data_row, column=1, value=rule_name)
+                    rule_cell.font = Font(bold=True, size=10, color=group_font_color)
+                    rule_cell.fill = group_fill
+                    rule_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                    rule_cell.border = thin_border
+
+                    # 合并规则名称单元格
+                    if rule_row_count > 1:
+                        ws.merge_cells(start_row=start_merge_row, start_column=1,
+                                       end_row=end_merge_row, end_column=1)
+
+                # 页码
+                page_cell = ws.cell(row=current_data_row, column=2, value=record['page_number'])
+                page_cell.alignment = center_alignment
+                page_cell.border = thin_border
+
+                # 检查依据
+                basis_cell = ws.cell(row=current_data_row, column=3, value=record['check_basis'])
+                basis_cell.alignment = data_alignment
+                basis_cell.border = thin_border
+
+                # 是否合规（用颜色区分）
+                compliant_cell = ws.cell(row=current_data_row, column=4, value=record['is_compliant'])
+                compliant_cell.alignment = center_alignment
+                compliant_cell.border = thin_border
+                if record['is_compliant'] == "合规":
+                    compliant_cell.font = Font(color="00AA00", bold=True)  # 绿色
+                else:
+                    compliant_cell.font = Font(color="DD0000", bold=True)  # 红色
+
+                # 置信度
+                confidence_value = f"{record['confidence']:.2%}" if record['confidence'] else "-"
+                confidence_cell = ws.cell(row=current_data_row, column=5, value=confidence_value)
+                confidence_cell.alignment = center_alignment
+                confidence_cell.border = thin_border
+
+            # 移动到下一组（不添加空行）
+            current_row += rule_row_count
+
+        # 10. 设置列宽
+        ws.column_dimensions['A'].width = 25  # 规则名称
+        ws.column_dimensions['B'].width = 10  # 页码
+        ws.column_dimensions['C'].width = 60  # 检查依据
+        ws.column_dimensions['D'].width = 12  # 是否合规
+        ws.column_dimensions['E'].width = 12  # 置信度
+
+        # 11. 保存到内存流
+        buffer = BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        logger.info(f"成功导出合规子任务 {sub_compliance_check_task_id} 的风险记录，共 {len(risk_records)} 条")
+        return buffer
+
+    except Exception as e:
+        logger.error(f"导出合规风险记录失败: {str(e)}", exc_info=True)
+        raise

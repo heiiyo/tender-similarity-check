@@ -52,7 +52,7 @@ class SkillComplianceListFormat(BaseModel):
     skill_name: str = Field(
         description="技能名称， 用于标识是哪个skill在执行",
     )
-    result_type: str = Field(
+    result_type: int = Field(
         description="结果类型，用于标识是哪类结果",
     )
     items: list[SkillComplianceFormat] = Field(

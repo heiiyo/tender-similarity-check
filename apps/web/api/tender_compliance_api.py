@@ -1,11 +1,13 @@
+from datetime import datetime
 from typing import List
 
 from fastapi import APIRouter
+from starlette.responses import StreamingResponse
 
 from apps.service.tender_compliance_service import add_compliance_rule, update_compliance_rule_info, \
     query_compliance_rules_list, query_tender_compliance_list, query_tender_compliance_info, \
     update_compliance_rule_sort_order, query_all_compliance_rules, get_compliance_rule_by_id, \
-    delete_compliance_rule_by_id, delete_skill_by_name, get_compliance_info
+    delete_compliance_rule_by_id, delete_skill_by_name, get_compliance_info, export_compliance_risk_records_to_excel
 from apps.web.dto.compliance_dto import TenderComplianceDTO, ComplianceRulesConditionDTO, ComplianceInfoConditionDto
 from apps.web.dto.tender_task import BasePageDto
 from apps.web.vo.similarity_respose import BaseResponse
@@ -127,6 +129,37 @@ def get_tender_compliance_info(compliance_info_condition: ComplianceInfoConditio
     """
     compliance_info_list = get_compliance_info(compliance_info_condition)
     return BaseResponse.success(data=compliance_info_list)
+
+
+@tender_compliance_router.get("/export_compliance_records/{sub_compliance_check_task_id}",
+                              description="导出合规检测风险记录为Excel")
+def export_compliance_records(sub_compliance_check_task_id: int):
+    """
+    根据合规子任务ID导出风险记录为Excel文件
+
+    :param sub_compliance_check_task_id: 合规子任务ID
+    :return: Excel 文件流
+    """
+    try:
+        # 调用服务层导出方法
+        excel_buffer = export_compliance_risk_records_to_excel(sub_compliance_check_task_id)
+
+        # 生成文件名
+        filename = f"compliance_records_{sub_compliance_check_task_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+        # 返回文件流
+        return StreamingResponse(
+            content=excel_buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f'attachment; filename*=UTF-8\'\'{filename}'
+            }
+        )
+    except ValueError as e:
+        return BaseResponse.error(message=str(e))
+    except Exception as e:
+        logger.error(f"导出Excel失败: {str(e)}", exc_info=True)
+        return BaseResponse.error(message=f"导出失败: {str(e)}")
 
 
 

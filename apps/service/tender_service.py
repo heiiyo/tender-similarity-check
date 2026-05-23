@@ -1,6 +1,4 @@
 import asyncio
-import json
-import re
 from io import BytesIO
 from itertools import combinations
 from typing import List
@@ -8,7 +6,7 @@ from typing import List
 import openpyxl
 from fastapi import BackgroundTasks
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from sqlalchemy import desc, and_, or_
 
 from apps import AppContext
@@ -18,7 +16,8 @@ from apps.document_parser.markdown_parser import MarkDownParser
 from apps.document_parser.pdf_parser import PdfParser
 from apps.repository.entity.file_entity import FileRecordEntity
 from apps.repository.entity.tender_entity import BidPlagiarismCheckTask, SubBidPlagiarismCheckTask, \
-    DocumentSimilarityRecord, SubComplianceCheckTask, TenderComplianceRiskRecord
+    DocumentSimilarityRecord, SubComplianceCheckTask, TenderComplianceRiskRecord, TenderTopic, TenderPDFImageEntity, \
+    TenderRuleConfiguration
 from apps.repository.minio_repository import get_file_url, delete_object
 from apps.service.milnus_service import create_tender_vector_milvus_db, create_tender_reference_vector_milvus_db, \
     create_tender_topic_vector_milvus_db, create_rm_text_vector_milvus_db, create_main_topic_vector_milvus_db
@@ -273,7 +272,7 @@ def get_tender_task_list(condition: TenderConditionDto):
                 compliance_num=compliance_num,
                 similarity_num=similarity_num,
                 process_status=task.process_status,
-                created_at=format_datetime(task.created_at)
+                created_at=format_datetime(task.created_at, fmt="%Y-%m-%d %H:%M")
             ))
     page = TenderTaskPage(
         page_offset=condition.page_offset,
@@ -336,19 +335,187 @@ HEADERS = [
 
 def export_similarity_report_task_id(task_id):
     with app_context.db_session_factory() as session:
-        sub_bid_plagiarism_check_tasks: SubBidPlagiarismCheckTask = session.query(SubBidPlagiarismCheckTask)\
-            .filter(SubBidPlagiarismCheckTask.bid_plagiarism_check_task_id == task_id).all()
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "相似性对比"
-        for sub_bid_plagiarism_check_task in sub_bid_plagiarism_check_tasks:
-            export_similarity_report(sub_bid_plagiarism_check_task.id, wb)
-        # 2. 创建内存流
-        buffer = BytesIO()
-        # 6. 保存 Excel 到内存流
-        wb.save(buffer)
-        buffer.seek(0)  # 将指针重置到开头
-        return buffer
+        task: BidPlagiarismCheckTask = session.get(BidPlagiarismCheckTask, task_id)
+        if not task:
+            raise ValueError(f"任务 {task_id} 不存在")
+
+        if task.check_type == 1:
+            return export_similarity_check_report(session, task_id)
+        elif task.check_type == 2:
+            return export_compliance_check_report(session, task_id)
+        else:
+            raise ValueError(f"不支持的任务类型: {task.check_type}")
+
+
+def export_similarity_check_report(session, task_id):
+    """导出查重任务的相似性对比报告"""
+    sub_bid_plagiarism_check_tasks = session.query(SubBidPlagiarismCheckTask) \
+        .filter(SubBidPlagiarismCheckTask.bid_plagiarism_check_task_id == task_id).all()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "相似性对比"
+    for sub_bid_plagiarism_check_task in sub_bid_plagiarism_check_tasks:
+        export_similarity_report(sub_bid_plagiarism_check_task.id, wb)
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+def export_compliance_check_report(session, task_id):
+    """导出合规任务的合规检测报告"""
+    sub_compliance_tasks = session.query(SubComplianceCheckTask) \
+        .filter(SubComplianceCheckTask.bid_plagiarism_check_task_id == task_id).all()
+
+    if not sub_compliance_tasks:
+        raise ValueError(f"任务 {task_id} 没有合规子任务")
+
+    wb = openpyxl.Workbook()
+
+    for idx, sub_task in enumerate(sub_compliance_tasks):
+        if idx == 0:
+            ws = wb.active
+            ws.title = f"合规检测_{sub_task.tender_file_name[:20]}"
+        else:
+            ws = wb.create_sheet(title=f"合规检测_{sub_task.tender_file_name[:20]}")
+
+        risk_records = session.query(TenderComplianceRiskRecord).filter(
+            TenderComplianceRiskRecord.sub_compliance_check_task_id == sub_task.id
+        ).order_by(TenderComplianceRiskRecord.rule_id, TenderComplianceRiskRecord.page_number).all()
+
+        if not risk_records:
+            ws.cell(row=1, column=1, value="该标书暂无合规检测记录")
+            continue
+
+        rule_ids = list(set(record.rule_id for record in risk_records if record.rule_id))
+        rules_dict = {}
+        if rule_ids:
+            rules = session.query(TenderRuleConfiguration).filter(
+                TenderRuleConfiguration.id.in_(rule_ids)
+            ).all()
+            rules_dict = {rule.id: rule for rule in rules}
+
+        grouped_records = {}
+        rule_order = []
+        for record in risk_records:
+            rule_id = record.rule_id
+            if rule_id not in grouped_records:
+                rule_info = rules_dict.get(rule_id)
+                rule_name = rule_info.rule_name if rule_info else f"未知规则 (ID: {rule_id})"
+                grouped_records[rule_id] = {
+                    'rule_name': rule_name,
+                    'records': []
+                }
+                rule_order.append(rule_id)
+
+            compliant_text = "合规" if record.is_compliant == 1 else "不合规"
+            grouped_records[rule_id]['records'].append({
+                'page_number': record.page_number,
+                'check_basis': record.check_basis,
+                'is_compliant': compliant_text,
+                'confidence': record.confidence
+            })
+
+        headers = ["规则名称", "页码", "检查依据", "是否合规", "置信度"]
+
+        color_schemes = [
+            {"fill": "E3F2FD", "font": "1565C0"},
+            {"fill": "F3E5F5", "font": "6A1B9A"},
+            {"fill": "E8F5E9", "font": "2E7D32"},
+            {"fill": "FFF3E0", "font": "EF6C00"},
+            {"fill": "FCE4EC", "font": "C2185B"},
+            {"fill": "E0F2F1", "font": "00695C"},
+            {"fill": "FBE9E7", "font": "D84315"},
+            {"fill": "F1F8E9", "font": "558B2F"},
+        ]
+
+        thin_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+
+        current_row = 1
+
+        header_font = Font(bold=True, size=11, color="FFFFFF")
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center")
+
+        for col_idx, header in enumerate(headers, 1):
+            cell = ws.cell(row=current_row, column=col_idx, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
+
+        current_row += 1
+
+        for idx, rule_id in enumerate(rule_order):
+            group_data = grouped_records[rule_id]
+            rule_name = group_data['rule_name']
+            records = group_data['records']
+
+            color_scheme = color_schemes[idx % len(color_schemes)]
+
+            group_fill = PatternFill(start_color=f"FF{color_scheme['fill']}", end_color=f"FF{color_scheme['fill']}",
+                                     fill_type="solid")
+            group_font_color = f"FF{color_scheme['font']}"
+
+            rule_row_count = len(records)
+            start_merge_row = current_row
+            end_merge_row = current_row + rule_row_count - 1
+
+            data_alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+            center_alignment = Alignment(horizontal="center", vertical="center")
+
+            for row_offset, record in enumerate(records):
+                current_data_row = current_row + row_offset
+
+                if row_offset == 0:
+                    rule_cell = ws.cell(row=current_data_row, column=1, value=rule_name)
+                    rule_cell.font = Font(bold=True, size=10, color=group_font_color)
+                    rule_cell.fill = group_fill
+                    rule_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                    rule_cell.border = thin_border
+
+                    if rule_row_count > 1:
+                        ws.merge_cells(start_row=start_merge_row, start_column=1,
+                                       end_row=end_merge_row, end_column=1)
+
+                page_cell = ws.cell(row=current_data_row, column=2, value=record['page_number'])
+                page_cell.alignment = center_alignment
+                page_cell.border = thin_border
+
+                basis_cell = ws.cell(row=current_data_row, column=3, value=record['check_basis'])
+                basis_cell.alignment = data_alignment
+                basis_cell.border = thin_border
+
+                compliant_cell = ws.cell(row=current_data_row, column=4, value=record['is_compliant'])
+                compliant_cell.alignment = center_alignment
+                compliant_cell.border = thin_border
+                if record['is_compliant'] == "合规":
+                    compliant_cell.font = Font(color="00AA00", bold=True)
+                else:
+                    compliant_cell.font = Font(color="DD0000", bold=True)
+
+                confidence_value = f"{record['confidence']:.2%}" if record['confidence'] else "-"
+                confidence_cell = ws.cell(row=current_data_row, column=5, value=confidence_value)
+                confidence_cell.alignment = center_alignment
+                confidence_cell.border = thin_border
+
+            current_row += rule_row_count
+
+        ws.column_dimensions['A'].width = 25
+        ws.column_dimensions['B'].width = 10
+        ws.column_dimensions['C'].width = 60
+        ws.column_dimensions['D'].width = 12
+        ws.column_dimensions['E'].width = 12
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
 
 
 def export_similarity_report(sub_task_id, workbook: Workbook)-> Workbook:
@@ -495,7 +662,8 @@ def get_tender_similarity_info_by_file_id(tender_similarity_dto: TenderSimilarit
         total=count,
         data=task_data,
         tender_reference=tender_reference_url,
-        tender_list=file_record_vo
+        tender_list=file_record_vo,
+        sub_task_id=sub_bid_plagiarism_check_task.id
     )
     return tender_similarity_vo
 
@@ -519,26 +687,230 @@ def batch_update_tender_similarity_info(ids):
 
 
 def delete_tender_task_by_task_id(task_id: int):
-    with app_context.db_session_factory() as session:
-        task_record = session.get(BidPlagiarismCheckTask, task_id)
-        session.query(SubBidPlagiarismCheckTask).filter_by(bid_plagiarism_check_task_id=task_id).delete()
-        session.query(DocumentSimilarityRecord).filter_by(bid_plagiarism_check_task_id=task_id).delete()
+    """
+    删除标书任务及其所有相关数据
 
-        # 获取招标文件id
-        # tender_reference_file_id = task_record.tender_reference_file_id
-        # 获取任务所有的标书id "1,2,3,4"
-        if task_record:
-            file_id_list: str = task_record.file_id_list
-            # 获取查重任务中的所有标书信息
-            if file_id_list:
-                file_id_int_list = [int(x.strip()) for x in file_id_list.split(',')]
-                file_record_entity_list = session.query(FileRecordEntity).filter(
-                    FileRecordEntity.id.in_(file_id_int_list)).all()
-                for file_record_item in file_record_entity_list:
-                    delete_object(file_record_item.file_path)
-                    session.delete(file_record_item)
+    同步删除（数据库事务内，极速完成）：
+    - BidPlagiarismCheckTask（主任务）
+    - SubBidPlagiarismCheckTask（查重子任务）
+    - SubComplianceCheckTask（合规子任务）
+
+    异步删除（后台线程执行）：
+    - TenderComplianceRiskRecord（合规风险记录）
+    - DocumentSimilarityRecord（相似度记录）
+    - TenderTopic（目录信息）
+    - TenderPDFImageEntity（页面图片关联）
+    - FileRecordEntity（文件记录）
+    - MinIO 文件存储
+    - Milvus 向量数据
+    """
+    try:
+        with app_context.db_session_factory() as session:
+            # 1. 获取主任务信息
+            task_record = session.get(BidPlagiarismCheckTask, task_id)
+            if not task_record:
+                logger.warning(f"任务 {task_id} 不存在")
+                return
+
+            logger.info(f"开始删除任务 {task_id}，任务名称: {task_record.task_name}")
+
+            # 2. 收集需要异步删除的数据
+            file_ids_for_async = []
+            tender_reference_file_id = None
+
+            if task_record.file_id_list:
+                file_ids_for_async = [int(x.strip()) for x in task_record.file_id_list.split(',')]
+
+            tender_reference_file_id = task_record.tender_reference_file_id
+            check_type = task_record.check_type
+
+            # 3. 同步删除核心任务表（仅删除主任务和子任务）
+            if check_type == 1:
+                # 查重任务：删除 SubBidPlagiarismCheckTask
+                sub_task_deleted = session.query(SubBidPlagiarismCheckTask).filter(
+                    SubBidPlagiarismCheckTask.bid_plagiarism_check_task_id == task_id
+                ).delete(synchronize_session=False)
+                logger.info(f"删除查重子任务 {sub_task_deleted} 条")
+
+            elif check_type == 2:
+                # 合规任务：删除 SubComplianceCheckTask（TenderComplianceRiskRecord 异步删除）
+                sub_compliance_deleted = session.query(SubComplianceCheckTask).filter(
+                    SubComplianceCheckTask.bid_plagiarism_check_task_id == task_id
+                ).delete(synchronize_session=False)
+                logger.info(f"删除合规子任务 {sub_compliance_deleted} 条")
+
+            # 4. 删除主任务
             session.delete(task_record)
+            logger.info(f"删除主任务: {task_id}")
+
+            # 5. 提交数据库事务（核心任务已删除）
             session.commit()
+            logger.info(f"核心任务数据删除完成，开始异步清理其他资源")
+
+        # ========== 异步删除所有其他资源 ==========
+        import threading
+
+        def async_cleanup():
+            """异步清理所有非核心资源"""
+            try:
+                with app_context.db_session_factory() as session:
+                    # A. 删除 TenderComplianceRiskRecord（合规风险记录）
+                    if check_type == 2:
+                        # 先查询所有合规子任务的ID（虽然子任务已删除，但可以通过 bid_plagiarism_check_task_id 关联）
+                        # 由于子任务已删除，我们需要通过其他方式找到风险记录
+                        # 这里直接通过 bid_plagiarism_check_task_id 删除
+                        risk_records_deleted = session.query(TenderComplianceRiskRecord).filter(
+                            TenderComplianceRiskRecord.bid_plagiarism_check_task_id == task_id
+                        ).delete(synchronize_session=False)
+                        logger.info(f"异步删除合规风险记录 {risk_records_deleted} 条")
+
+                    # B. 删除 DocumentSimilarityRecord（相似度记录）
+                    if check_type == 1:
+                        similarity_deleted = session.query(DocumentSimilarityRecord).filter(
+                            DocumentSimilarityRecord.bid_plagiarism_check_task_id == task_id
+                        ).delete(synchronize_session=False)
+                        logger.info(f"异步删除相似度记录 {similarity_deleted} 条")
+
+                    # C. 删除 TenderTopic、TenderPDFImageEntity 和 FileRecordEntity
+                    file_paths_to_delete = []
+
+                    for file_id in file_ids_for_async:
+                        # C1. 删除目录信息
+                        topics_deleted = session.query(TenderTopic).filter(
+                            TenderTopic.tender_file_id == file_id
+                        ).delete(synchronize_session=False)
+                        logger.info(f"异步删除文件 {file_id} 的目录信息 {topics_deleted} 条")
+
+                        # C2. 删除页面图片关联及对应的文件
+                        images_entities = session.query(TenderPDFImageEntity).filter(
+                            TenderPDFImageEntity.tender_file_id == file_id
+                        ).all()
+
+                        page_file_ids = []
+                        for image_entity in images_entities:
+                            page_file_ids.append(image_entity.file_id)
+
+                        # 收集页面图片的文件路径并删除记录
+                        if page_file_ids:
+                            page_file_records = session.query(FileRecordEntity).filter(
+                                FileRecordEntity.id.in_(page_file_ids)
+                            ).all()
+
+                            for page_file_record in page_file_records:
+                                file_paths_to_delete.append(page_file_record.file_path)
+                                session.delete(page_file_record)
+
+                            logger.info(f"异步删除文件 {file_id} 的页面图片文件记录 {len(page_file_records)} 条")
+
+                        # 删除页面图片关联记录本身
+                        images_count = session.query(TenderPDFImageEntity).filter(
+                            TenderPDFImageEntity.tender_file_id == file_id
+                        ).delete(synchronize_session=False)
+                        logger.info(f"异步删除文件 {file_id} 的页面图片关联 {images_count} 条")
+
+                        # C3. 删除主文件的文件记录
+                        file_record = session.get(FileRecordEntity, file_id)
+                        if file_record:
+                            file_paths_to_delete.append(file_record.file_path)
+                            session.delete(file_record)
+                            logger.info(f"异步删除文件记录: {file_id}")
+
+                    # C4. 删除招标文件的文件记录
+                    if tender_reference_file_id:
+                        reference_file = session.get(FileRecordEntity, tender_reference_file_id)
+                        if reference_file:
+                            file_paths_to_delete.append(reference_file.file_path)
+                            session.delete(reference_file)
+                            logger.info(f"异步删除招标文件记录: {tender_reference_file_id}")
+
+                    # 提交数据库删除
+                    session.commit()
+                    logger.info(f"异步数据库清理完成")
+
+                # D. 异步删除 MinIO 文件
+                logger.info(f"开始删除 {len(file_paths_to_delete)} 个 MinIO 文件")
+                for file_path in file_paths_to_delete:
+                    try:
+                        delete_object(file_path)
+                        logger.info(f"删除 MinIO 文件: {file_path}")
+                    except Exception as e:
+                        logger.error(f"删除 MinIO 文件失败 {file_path}: {str(e)}")
+
+                logger.info(f"MinIO 文件删除完成")
+
+                # E. 异步删除 Milvus 向量数据
+                logger.info(f"开始删除 Milvus 向量数据")
+
+                for file_id in file_ids_for_async:
+                    try:
+                        # 删除 tender_vector_collection 中的向量数据
+                        milvus_vector_db = create_tender_vector_milvus_db(4096)
+                        vector_deleted = milvus_vector_db.collection.delete(f"file_id == {file_id}")
+                        logger.info(
+                            f"删除 tender_vector_collection 中文件 {file_id} 的向量数据: {vector_deleted.delete_count} 条"
+                        )
+                    except Exception as e:
+                        logger.error(f"删除 tender_vector_collection 向量数据失败 {file_id}: {str(e)}")
+
+                    try:
+                        # 删除 tender_topic_vector_collection 中的向量数据
+                        milvus_topic_db = create_tender_topic_vector_milvus_db(4096)
+                        topic_deleted = milvus_topic_db.collection.delete(f"tender_file_id == {file_id}")
+                        logger.info(
+                            f"删除 tender_topic_vector_collection 中文件 {file_id} 的向量数据: {topic_deleted.delete_count} 条"
+                        )
+                    except Exception as e:
+                        logger.error(f"删除 tender_topic_vector_collection 向量数据失败 {file_id}: {str(e)}")
+
+                # 删除招标文件的向量数据
+                if tender_reference_file_id:
+                    try:
+                        milvus_reference_db = create_tender_reference_vector_milvus_db(4096)
+                        reference_deleted = milvus_reference_db.collection.delete(
+                            f"file_id == {tender_reference_file_id}"
+                        )
+                        logger.info(
+                            f"删除 tender_reference_vector_collection 中招标文件 {tender_reference_file_id} 的向量数据: {reference_deleted.delete_count} 条"
+                        )
+                    except Exception as e:
+                        logger.error(f"删除 tender_reference_vector_collection 向量数据失败: {str(e)}")
+
+                logger.info(f"Milvus 向量数据删除完成")
+                logger.info(f"任务 {task_id} 所有资源清理完成")
+
+            except Exception as e:
+                logger.error(f"异步清理资源失败: {str(e)}", exc_info=True)
+
+        # 启动后台线程执行异步清理
+        cleanup_thread = threading.Thread(target=async_cleanup, daemon=True)
+        cleanup_thread.start()
+        logger.info(f"已启动后台清理线程，任务 {task_id} 的核心数据已同步删除")
+
+    except Exception as e:
+        logger.error(f"删除任务 {task_id} 失败: {str(e)}", exc_info=True)
+        raise
+
+# def delete_tender_task_by_task_id(task_id: int):
+#     with app_context.db_session_factory() as session:
+#         task_record = session.get(BidPlagiarismCheckTask, task_id)
+#         session.query(SubBidPlagiarismCheckTask).filter_by(bid_plagiarism_check_task_id=task_id).delete()
+#         session.query(DocumentSimilarityRecord).filter_by(bid_plagiarism_check_task_id=task_id).delete()
+#
+#         # 获取招标文件id
+#         # tender_reference_file_id = task_record.tender_reference_file_id
+#         # 获取任务所有的标书id "1,2,3,4"
+#         if task_record:
+#             file_id_list: str = task_record.file_id_list
+#             # 获取查重任务中的所有标书信息
+#             if file_id_list:
+#                 file_id_int_list = [int(x.strip()) for x in file_id_list.split(',')]
+#                 file_record_entity_list = session.query(FileRecordEntity).filter(
+#                     FileRecordEntity.id.in_(file_id_int_list)).all()
+#                 for file_record_item in file_record_entity_list:
+#                     delete_object(file_record_item.file_path)
+#                     session.delete(file_record_item)
+#             session.delete(task_record)
+#             session.commit()
 
 
 async def handle_tender_tender_reference_file(file_id: int):
@@ -741,3 +1113,39 @@ class CheckTask:
             sub_task.similarity_number = len(document_similarity_records)
             session.add(sub_task)
             session.commit()
+
+
+def batch_delete_tender_tasks(task_ids: List[int]):
+    """
+    批量删除标书任务
+
+    :param task_ids: 任务ID列表
+    """
+    if not task_ids:
+        logger.warning("批量删除任务列表为空")
+        return
+
+    logger.info(f"开始批量删除 {len(task_ids)} 个任务")
+
+    success_count = 0
+    failed_count = 0
+    failed_tasks = []
+
+    for task_id in task_ids:
+        try:
+            delete_tender_task_by_task_id(task_id)
+            success_count += 1
+            logger.info(f"任务 {task_id} 删除成功")
+        except Exception as e:
+            failed_count += 1
+            failed_tasks.append({"task_id": task_id, "error": str(e)})
+            logger.error(f"任务 {task_id} 删除失败: {str(e)}")
+
+    logger.info(f"批量删除完成: 成功 {success_count} 个, 失败 {failed_count} 个")
+
+    return {
+        "total": len(task_ids),
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "failed_tasks": failed_tasks
+    }

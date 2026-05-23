@@ -24,14 +24,15 @@ class TaskTypeEnum(int, Enum):
     CIVIL = 2
     MILITARY = 3
 
-def format_datetime(value) -> str:
+def format_datetime(value, fmt = "%Y-%m-%d %H:%M:%S") -> str:
     """
     日期格式化
     :param value:
+    :param fmt:
     :return:
     """
     if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
+        return value.strftime(fmt)
     return value
 
 
@@ -76,6 +77,7 @@ class TenderSimilarityVO(BasePage):
     data: Optional[Any] = None
     tender_reference: Optional[str] = None
     tender_list: Optional[List[FileRecordVO]] = None
+    sub_task_id: Optional[int] = None
 
 class TaskDataVO(BaseModel):
     id: Optional[int] = Field(description="任务id")

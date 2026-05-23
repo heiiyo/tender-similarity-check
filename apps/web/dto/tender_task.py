@@ -30,7 +30,7 @@ class TenderSimilarityDto(BasePageDto):
 
 
 class BatchIds(BaseModel):
-    ids: List[int]
+    task_ids: List[int]
 
 
 

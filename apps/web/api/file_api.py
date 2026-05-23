@@ -2,7 +2,7 @@ from typing import List
 
 from fastapi import APIRouter, UploadFile, Form, File
 
-from apps.service.file_service import upload_file, upload_skill_zip
+from apps.service.file_service import upload_file, upload_skill_zip, upload_file_with_project_name
 from apps.web.vo.similarity_respose import BaseResponse
 from logger_config import get_logger, setup_logging
 
@@ -23,6 +23,38 @@ async def tender_file_upload(
     """
     file_ids = upload_file(files, business_id)
     return BaseResponse.success(message="文件上传成功", data=file_ids)
+
+
+@file_router.post("/upload-with-project-name", response_model=BaseResponse)
+async def upload_file_with_name(
+        files: List[UploadFile] = File(..., description="请上传文件（支持PDF、Word等格式）"),
+        business_id: str = Form(default="tender")
+):
+    """
+    文件上传接口，自动解析文件第一页提取项目名称（大标题）
+    :param files: 接收上传文件
+    :param business_id: 业务id，默认为tender
+    :return: 返回文件ID列表及对应的项目名称
+    """
+    supported_types = ['.pdf', '.docx', '.doc']
+
+    for file in files:
+        file_ext = file.filename.lower().split('.')[-1] if '.' in file.filename else ''
+        if f'.{file_ext}' not in supported_types:
+            return BaseResponse.error(
+                message=f"不支持的文件格式: .{file_ext}，仅支持 {', '.join(supported_types)}"
+            )
+
+    try:
+        result_list = upload_file_with_project_name(files, business_id)
+
+        return BaseResponse.success(
+            message="文件上传成功",
+            data=result_list
+        )
+    except Exception as e:
+        logger.error(f"文件上传失败: {str(e)}", exc_info=True)
+        return BaseResponse.error(message=f"文件上传失败: {str(e)}")
 
 
 @file_router.post("/upload-skill", response_model=BaseResponse)

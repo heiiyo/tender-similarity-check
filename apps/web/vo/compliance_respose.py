@@ -21,7 +21,9 @@ class ComplianceRulesPage(BasePage):
 
 class SkillComplianceFormat(BaseModel):
     """技能执行完成后的合规判定（结构化输出）。"""
-
+    confidence_level: float = Field(
+        description="综合 SKILL 要求与工具返回事实，判定的置信度。",
+    )
     is_compliant: bool = Field(
         description="综合 SKILL 要求与工具返回事实，结论是否合规：true=合规，false=不合规或存在缺陷。",
     )
@@ -52,3 +54,4 @@ class TenderComplianceInfoVO(BaseModel):
     passed_number: Optional[int]
     tender_list: Optional[List[Any]]
     data:Optional[List[ComplianceInfoVO]]
+    sub_task_id: Optional[int] = None
