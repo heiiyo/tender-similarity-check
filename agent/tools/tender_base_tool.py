@@ -12,6 +12,7 @@ from apps import AppContext
 from apps.repository.entity.tender_entity import TenderTopic, TenderPDFImageEntity, SubBidPlagiarismCheckTask, \
     SubComplianceCheckTask, TenderComplianceRiskRecord
 from apps.repository.entity.file_entity import FileRecordEntity
+from apps.repository.minio_repository import get_object_bytes
 
 from logger_config import get_logger, setup_logging
 
@@ -25,6 +26,121 @@ def query_tender_base_info(bid_id):
     :param bid_id: 要查询的标书的唯一数字ID（tender_file_id）。
     """
     pass
+
+
+@tool
+def analyze_tender_page_with_ocr(bid_id: int, page_numbers: List[int], user_intent: str):
+    """
+    使用OCR视觉模型分析标书指定页面的内容，判断是否符合用户意图
+
+    :param bid_id: 要分析的标书的唯一数字ID（tender_file_id）。
+    :param page_numbers: 需要分析的页码列表，例如 [1, 5, 10]。
+    :param user_intent: 用户意图描述，例如"分析是否有有效的证书信息"、"检查是否存在资质证书"等。
+    :return: 一个字典列表，每个元素代表一页的分析结果，包含：
+             - is_compliant (bool): 是否符合用户意图
+             - page_number (int): 页码
+             - check_basis (str): 检查依据和详细说明
+
+             例如：[
+               {"is_compliant": True, "page_number": 1, "check_basis": "检测到有效的ISO9001认证证书"},
+               {"is_compliant": False, "page_number": 2, "check_basis": "未检测到相关证书信息"},
+               ...
+             ]
+    """
+    from agent.model.orc import scan_orc_content
+
+    results = []
+
+    try:
+        app_context = AppContext()
+
+        # 1. 从数据库获取指定页码的图片记录
+        with app_context.db_session_factory() as session:
+            image_records = session.query(TenderPDFImageEntity).filter(
+                TenderPDFImageEntity.tender_file_id == bid_id,
+                TenderPDFImageEntity.page_number.in_(page_numbers)
+            ).order_by(TenderPDFImageEntity.page_number.asc()).all()
+
+            if not image_records:
+                logger.warning(f"标书 {bid_id} 在页码 {page_numbers} 中未找到对应的图片记录")
+                return [{
+                    "is_compliant": False,
+                    "page_number": page,
+                    "check_basis": f"第{page}页：未找到对应的图片记录"
+                } for page in page_numbers]
+
+            # 2. 遍历每一页进行OCR分析
+            for record in image_records:
+                try:
+                    page_num = record.page_number
+                    file_id = record.file_id
+
+                    # 3. 根据file_id获取文件记录
+                    file_record = session.get(FileRecordEntity, file_id)
+                    if not file_record:
+                        logger.warning(f"文件记录 {file_id} 不存在")
+                        results.append({
+                            "is_compliant": False,
+                            "page_number": page_num,
+                            "check_basis": f"第{page_num}页：文件记录不存在"
+                        })
+                        continue
+
+                    # 4. 从MinIO获取图片数据
+                    img_bytes = get_object_bytes(file_record.file_path)
+
+                    # 5. 转换为base64用于OCR识别
+                    base64_str = base64.b64encode(img_bytes).decode("utf-8")
+
+                    # 6. 构建OCR提示词，结合用户意图
+                    ocr_prompt = f"""请仔细分析这张图片，判断以下内容：
+                    {user_intent}
+                    
+                    请提供详细的分析结果，包括：
+                    1. 是否检测到相关内容
+                    2. 检测到的具体内容是什么
+                    3. 内容的有效性评估"""
+
+                    # 7. 调用OCR模型进行识别
+                    ocr_result = scan_orc_content(base64_str, prompt_text=ocr_prompt)
+
+                    # 8. 解析OCR结果，判断是否符合用户意图
+                    # 这里可以根据具体的用户意图做更精细的判断逻辑
+                    # 目前采用简单的关键词匹配方式
+                    ocr_text_lower = ocr_result.lower() if isinstance(ocr_result, str) else ""
+
+                    # 判断是否合规（可以根据实际需求调整判断逻辑）
+                    is_compliant = any(keyword in ocr_text_lower for keyword in ["证书", "资质", "有效", "认证"])
+
+                    results.append({
+                        "is_compliant": is_compliant,
+                        "page_number": page_num,
+                        "check_basis": f"第{page_num}页：{ocr_result}"
+                    })
+
+                    logger.info(f"标书 {bid_id} 第 {page_num} 页OCR分析完成")
+
+                except Exception as page_error:
+                    logger.error(f"标书 {bid_id} 第 {record.page_number} 页OCR分析失败: {str(page_error)}",
+                                 exc_info=True)
+                    results.append({
+                        "is_compliant": False,
+                        "page_number": record.page_number,
+                        "check_basis": f"第{record.page_number}页：OCR分析失败 - {str(page_error)}"
+                    })
+
+        # 按页码排序
+        results.sort(key=lambda x: x["page_number"])
+        logger.info(f"标书 {bid_id} OCR分析完成，共分析 {len(results)} 页")
+        return results
+
+    except Exception as e:
+        logger.error(f"标书 {bid_id} OCR分析整体失败: {str(e)}", exc_info=True)
+        return [{
+            "is_compliant": False,
+            "page_number": page,
+            "check_basis": f"OCR分析整体失败: {str(e)}"
+        } for page in page_numbers]
 
 
 @tool

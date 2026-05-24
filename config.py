@@ -111,6 +111,7 @@ mysql_config = data_config["mysql"]
 llm_model_config = data_config["llm_model"]
 embedding_config = data_config["embedding"]
 mineru_config = data_config["mineru"]
+orc_model_config = data_config["orc_model"]
 
 
-__all__ = ["data_config", "milvus_config", "minio_config", "mysql_config", "embedding_config", "llm_model_config", "mineru_config"]
+__all__ = ["data_config", "milvus_config", "minio_config", "mysql_config", "embedding_config", "llm_model_config", "mineru_config", "orc_model_config"]

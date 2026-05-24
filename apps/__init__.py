@@ -30,7 +30,7 @@ class AppContext:
 
     def init_context(self):
         from config import (data_config, milvus_config, minio_config,
-                            mysql_config, llm_model_config, embedding_config, mineru_config)
+                            mysql_config, llm_model_config, embedding_config, mineru_config, orc_model_config)
         if self.app:
             self.app.state.app_context = self
             self.app.state.app_config = data_config
@@ -39,6 +39,7 @@ class AppContext:
             self.app.state.mysql_config = mysql_config
             self.app.state.llm_model_config = llm_model_config
             self.app.state.embedding_config = embedding_config
+            self.app.state.orc_model_config = orc_model_config
         self.app_config = data_config
         self.milvus_config = milvus_config
         self.minio_config = minio_config
@@ -46,6 +47,7 @@ class AppContext:
         self.llm_model_config = llm_model_config
         self.embedding_config = embedding_config
         self.mineru_config = mineru_config
+        self.orc_model_config = orc_model_config
         self._init()
         return self
 
@@ -58,6 +60,8 @@ class AppContext:
         self._init_llm()
         self._init_embedding()
         self._init_agent_model()
+        self._init_ocr_model()
+
 
     def _init_mysql(self):
         """
@@ -167,4 +171,25 @@ class AppContext:
             api_key=embedding_model_config['api_key'],
             model_name=embedding_model_config['model_name'],
             base_url=embedding_model_config['url']
+        )
+
+    def _init_ocr_model(self):
+        """
+        初始化OCR视觉大模型
+        """
+        from langchain_siliconflow import ChatSiliconFlow
+        orc_config = self.orc_model_config
+
+        # 从配置中读取base_url，如果包含/chat/completions则去掉
+        base_url = orc_config['url']
+        if base_url.endswith('/chat/completions'):
+            base_url = base_url.replace('/chat/completions', '')
+
+        self.ocr_model = ChatSiliconFlow(
+            base_url=base_url,
+            model=orc_config['model_name'],
+            api_key=orc_config['api_key'],
+            temperature=0,
+            max_tokens=1000,
+            timeout=300
         )

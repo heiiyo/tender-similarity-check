@@ -596,7 +596,7 @@ async def compliance_validation(tender_file_id):
         
         # 4. 并行执行所有规则检查
         logger.info(f"标书 {tender_file_id} 开始执行 {len(rule_list)} 个合规规则检查")
-        asyncio_task = [
+        asyncio_tasks = [
             handle_rule(rule, tender_file_id,
                         sub_compliance_check_task_id,
                         bid_plagiarism_check_task_id)
@@ -604,7 +604,7 @@ async def compliance_validation(tender_file_id):
         ]
         
         # 使用 gather 并行执行，并捕获异常避免单个规则失败影响整体
-        await asyncio.gather(*asyncio_task, return_exceptions=True)
+        await asyncio.gather(*asyncio_tasks, return_exceptions=True)
         
         logger.info(f"标书 {tender_file_id} 合规验证完成")
     
