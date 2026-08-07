@@ -1,6 +1,8 @@
-import asyncio
 import bisect
 import json
+import multiprocessing
+import random
+import threading
 from abc import ABC, abstractmethod
 import re
 from io import BytesIO
@@ -16,6 +18,106 @@ from logger_config import get_logger, setup_logging
 
 setup_logging()
 logger = get_logger(name=__name__)
+
+# MinerU 并发控制：MinerU 服务能力有限，限制同时调用的数量
+MINERU_SEMAPHORE = multiprocessing.BoundedSemaphore(3)
+
+
+class MinerULoadBalancer:
+    """MinerU 负载均衡器，支持多种算法，线程安全。"""
+
+    ALGORITHMS = ("round_robin", "random", "weighted_random", "weighted_round_robin")
+
+    def __init__(self, nodes: list[dict], algorithm: str = "round_robin"):
+        """
+        :param nodes: [{"url": "...", "weight": 3}, ...]
+        :param algorithm: round_robin | random | weighted_random | weighted_round_robin
+        """
+        if algorithm not in self.ALGORITHMS:
+            raise ValueError(f"不支持的负载均衡算法: {algorithm}，可选: {self.ALGORITHMS}")
+        if not nodes:
+            raise ValueError("mineru nodes 不能为空")
+        self.nodes = nodes
+        self.algorithm = algorithm
+        self._lock = threading.Lock()
+
+        # round_robin / weighted_round_robin 共用计数器
+        self._counter = 0
+
+        # weighted_round_robin: 将权重展开为虚拟节点序列
+        if algorithm == "weighted_round_robin":
+            self._weighted_sequence = []
+            for i, node in enumerate(nodes):
+                self._weighted_sequence.extend([i] * node.get("weight", 1))
+            if not self._weighted_sequence:
+                raise ValueError("weighted_round_robin: 权重之和不能为 0")
+
+        # weighted_random: 预计算累积权重分布
+        if algorithm == "weighted_random":
+            self._weights = [node.get("weight", 1) for node in nodes]
+
+    def select(self) -> str:
+        """线程安全地选取一个节点 URL。"""
+        with self._lock:
+            return self._select_unlocked()
+
+    def _select_unlocked(self) -> str:
+        if self.algorithm == "round_robin":
+            idx = self._counter % len(self.nodes)
+            self._counter += 1
+            return self.nodes[idx]["url"]
+
+        if self.algorithm == "random":
+            return random.choice(self.nodes)["url"]
+
+        if self.algorithm == "weighted_random":
+            # Python 3.6+ random.choices 内部线程安全，但我们在锁内调用也无妨
+            population = [node["url"] for node in self.nodes]
+            return random.choices(population, weights=self._weights, k=1)[0]
+
+        if self.algorithm == "weighted_round_robin":
+            idx = self._weighted_sequence[self._counter % len(self._weighted_sequence)]
+            self._counter += 1
+            return self.nodes[idx]["url"]
+
+
+# 模块级负载均衡器实例（惰性初始化）
+_mineru_lb: MinerULoadBalancer | None = None
+_mineru_lb_lock = threading.Lock()
+
+
+def _get_mineru_lb() -> MinerULoadBalancer:
+    """惰性创建 MinerULoadBalancer，确保配置已加载。"""
+    global _mineru_lb
+    if _mineru_lb is not None:
+        return _mineru_lb
+    with _mineru_lb_lock:
+        if _mineru_lb is not None:
+            return _mineru_lb
+        config = AppContext().mineru_config
+        algorithm = config.get("load_balance", {}).get("algorithm", "round_robin")
+        nodes = config["nodes"]
+        _mineru_lb = MinerULoadBalancer(nodes, algorithm)
+        return _mineru_lb
+
+# 主标题匹配：一、、（一）、1.、第X章、第X条等，过滤子标题 1.1、2.3.1
+HEADING_PATTERN = re.compile(
+    r'^#?\s*'
+    r'(?!\d+\.\d+)'
+    r'(?:'
+    r'第[一二三四五六七八九十\d]+[章节条款]'
+    r'|'
+    r'[（(]?[一二三四五六七八九十]+[）)]?[、．.]?'
+    r'|'
+    r'\d+[、．.]'
+    r')'
+    r'\s*.+'
+)
+
+
+def is_heading(line: str) -> bool:
+    """判断一行文本是否为主标题（自动过滤 1.1、2.3.1 等子标题）。"""
+    return bool(HEADING_PATTERN.match(line.strip()) if line else False)
 
 
 class BaseParser(ABC):
@@ -167,7 +269,7 @@ class BaseParser(ABC):
                 # text = self.clean_text(text)
                 if not text or len(text) < 1:
                     continue
-                punctuations: str = r'，  。！？；\n'
+                punctuations: str = r'，。！？；'
                 text_length = len(text)
                 current_start = 0
                 if text_length <= chunk_size:
@@ -176,7 +278,7 @@ class BaseParser(ABC):
                     continue
                 # 编译正则：匹配任意结束标点（用于快速查找）
                 punctuation_pattern = re.compile(f'[{punctuations}]')
-                chunks = []
+                prev_start = -1
 
                 while current_start < text_length:
                     # 1. 计算目标结束位置（当前起始 + 目标长度）
@@ -184,7 +286,6 @@ class BaseParser(ABC):
 
                     # 2. 处理边界：如果目标结束超过文本长度，直接取剩余部分
                     if target_end >= text_length:
-                        chunks.append(text[current_start:])
                         document = HDocument(page_document.file_id, page_document.page, current_start, text[current_start:])
                         documents.append(document)
                         break
@@ -203,7 +304,6 @@ class BaseParser(ABC):
 
                     # 5. 截取当前块并加入列表
                     current_chunk = text[current_start:split_end]
-                    chunks.append(current_chunk)
                     document = HDocument(page_document.file_id, page_document.page, current_start, current_chunk)
                     documents.append(document)
                     # 6. 更新下一块的起始位置（当前结束 - 重叠长度）
@@ -212,9 +312,10 @@ class BaseParser(ABC):
                     # 防护：避免起始位置回退过多（比如重叠长度大于当前块）
                     if current_start < 0:
                         current_start = 0
-                    # 防护：避免死循环（相邻起始位置无变化）
-                    if current_start >= text_length or (len(chunks) >= 2 and current_start == chunks[-2]):
+                    # 防护：避免死循环（起始位置无变化）
+                    if current_start >= text_length or current_start == prev_start:
                         break
+                    prev_start = current_start
             
         return documents
 
@@ -239,24 +340,31 @@ class BaseParser(ABC):
             doc.close()
         return pages
 
-    async def to_images(self, tender_file_id, zoom=1.5):
+    def to_images(self, tender_file_id, zoom=1.5):
         """
         使用 PyMuPDF 快速转换 PDF 为图片
         :param tender_file_id 标书文件id
         :param zoom: 缩放倍率 (zoom=3.0 约等于 300 DPI，视原图大小而定)
         """
         from apps.service.file_service import task_upload
+        import concurrent.futures
 
-        pages = await asyncio.to_thread(self._render_pdf_pages, tender_file_id, zoom)
+        pages = self._render_pdf_pages(tender_file_id, zoom)
         res = []
-        for i in range(0, len(pages), 20):
-            batch = pages[i:i + 20]
-            batch_tasks = [
-                task_upload(pix_bytes, "png", "images", page_num, tender_file_id)
-                for page_num, pix_bytes in batch
-            ]
-            results = await asyncio.gather(*batch_tasks, return_exceptions=True)
-            res.extend(results)
+        with concurrent.futures.ProcessPoolExecutor(max_workers=5) as executor:
+            for i in range(0, len(pages), 20):
+                batch = pages[i:i + 20]
+                futures = [
+                    executor.submit(task_upload, pix_bytes, "png", "images", page_num, tender_file_id)
+                    for page_num, pix_bytes in batch
+                ]
+                batch_results = []
+                for future in futures:
+                    try:
+                        batch_results.append(future.result())
+                    except Exception:
+                        pass
+                res.extend(batch_results)
         self.image_ids = res
         return res
 
@@ -264,11 +372,26 @@ class BaseParser(ABC):
     def _mineru266(self, file_path=None, data_stream=None):
         text = ""
         mineru_config = AppContext().mineru_config
-        url = mineru_config['url']
         data = mineru_config['data']
-        if file_path:
-            with open(file_path, "rb") as f:
-                files = {"files": f}
+        url = _get_mineru_lb().select()
+
+        with MINERU_SEMAPHORE:
+            if file_path:
+                with open(file_path, "rb") as f:
+                    files = {"files": f}
+                    res = requests.post(url, files=files, data=data)
+                    if res.status_code != 200:
+                        raise Exception(f"_mineru266 接口异常: {res.text}")
+                    logger.info(f"_mineru266 接口返回: {res.text}")
+                    item = res.json()
+                    logger.info(f"_mineru266 解析结果{item}")
+                    for k1 in item["results"]:
+                        text = item["results"][k1]["md_content"]
+                        images = item["results"][k1]["images"]
+                        content_list = item["results"][k1]["content_list"]
+                return text, images, json.loads(content_list)
+            else:
+                files = {"files": data_stream}
                 res = requests.post(url, files=files, data=data)
                 if res.status_code != 200:
                     raise Exception(f"_mineru266 接口异常: {res.text}")
@@ -279,20 +402,7 @@ class BaseParser(ABC):
                     text = item["results"][k1]["md_content"]
                     images = item["results"][k1]["images"]
                     content_list = item["results"][k1]["content_list"]
-            return text, images, json.loads(content_list)
-        else:
-            files = {"files": data_stream}
-            res = requests.post(url, files=files, data=data)
-            if res.status_code != 200:
-                raise Exception(f"_mineru266 接口异常: {res.text}")
-            logger.info(f"_mineru266 接口返回: {res.text}")
-            item = res.json()
-            logger.info(f"_mineru266 解析结果{item}")
-            for k1 in item["results"]:
-                text = item["results"][k1]["md_content"]
-                images = item["results"][k1]["images"]
-                content_list = item["results"][k1]["content_list"]
-            return text, images, json.loads(content_list)
+                return text, images, json.loads(content_list)
 
     def is_scanned_pdf(self, filename=None, stream=None):
         """

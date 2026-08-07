@@ -1,4 +1,3 @@
-import asyncio
 import json
 import re
 import shutil
@@ -19,7 +18,9 @@ from agent.format.out_format import TopicListFormat
 from apps import AppContext
 from apps.algorithms.embedding import QwenEmbeddingVectorizer
 from apps.document_parser.base import HFiledocument, HDocument
+from apps.document_parser.base_parser import HEADING_PATTERN, is_heading
 from apps.document_parser.markdown_parser import MarkDownParser
+from apps.document_parser.doc_parser import DocParser
 from apps.model_action.vllm_service import handle_rule, handel_topic
 from apps.repository.entity.file_entity import FileRecordEntity
 from apps.repository.entity.tender_entity import TenderPDFImageEntity, TenderTopic, TenderRuleConfiguration, \
@@ -265,16 +266,20 @@ def create_compliance_check_task_record(tender_task_dto: TenderTaskDto):
         return task.id
 
 
-async def run_compliance_checks_task(file_ids: List[int], task_id: int):
+def run_compliance_checks_task(file_ids: List[int], task_id: int):
     """合规检测步骤：步骤内并发，步骤间由流水线顺序保证。"""
-    max_concurrency = 3
-    semaphore = asyncio.Semaphore(max_concurrency)
+    import concurrent.futures
 
-    async def process_one(tender_file_id: int):
-        async with semaphore:
-            await asyncio.to_thread(compliance_background_task, tender_file_id, task_id)
-
-    await asyncio.gather(*(process_one(fid) for fid in file_ids))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [
+            executor.submit(compliance_background_task, tender_file_id, task_id)
+            for tender_file_id in file_ids
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"合规检测子任务失败: {str(e)}")
 
 
 def compliance_background_task(tender_file_id, task_id):
@@ -291,7 +296,7 @@ def compliance_background_task(tender_file_id, task_id):
         session.commit()
         sub_compliance_id = sub_compliance.id
     # 执行合规分析
-    asyncio.run(compliance_validation(tender_file_id))
+    compliance_validation(tender_file_id)
     # 更新任务状态，以及风险数量
     with app_context.db_session_factory() as session:
         if sub_compliance_id:
@@ -507,38 +512,38 @@ def update_compliance_rule_sort_order(sort_list: List[dict]):
         session.commit()
 
 
-async def compliance_validation(tender_file_id):
+def compliance_validation(tender_file_id):
     """
     合规性验证主流程
     """
+    import concurrent.futures
+
     try:
         # 1. 获取子任务和主任务信息（前置校验，失败则快速返回）
         with app_context.db_session_factory() as session:
             sub_compliance_task = session.query(SubComplianceCheckTask).filter(
                 SubComplianceCheckTask.tender_file_id == tender_file_id
             ).order_by(SubComplianceCheckTask.id.desc()).first()
-            
+
             if not sub_compliance_task:
                 logger.error(f"未找到标书 {tender_file_id} 的合规子任务")
                 return
-            
+
             sub_compliance_check_task_id = sub_compliance_task.id
             bid_plagiarism_check_task_id = sub_compliance_task.bid_plagiarism_check_task_id
-            
+
             # 获取主任务信息以获取 task_type
             main_task = session.query(BidPlagiarismCheckTask).filter(
                 BidPlagiarismCheckTask.id == bid_plagiarism_check_task_id
             ).first()
-            
+
             if not main_task:
                 logger.error(f"未找到主任务 {bid_plagiarism_check_task_id}")
                 return
-            
-            task_type = main_task.task_type
-        
-        # 2. 并行检查并处理图片和目录
-        md_parser = MarkDownParser()
 
+            task_type = main_task.task_type
+
+        # 2. 并行检查并处理图片和目录
         # 检查是否需要生成图片
         with app_context.db_session_factory() as session:
             has_images = session.query(TenderPDFImageEntity).filter(
@@ -551,69 +556,75 @@ async def compliance_validation(tender_file_id):
                 TenderTopic.tender_file_id == tender_file_id
             ).first() is not None
 
-        # 构建并行任务列表
-        parallel_tasks = []
-
-        # 任务1：生成图片（如果需要）
-        if not has_images:
-            parallel_tasks.append(md_parser.to_images(tender_file_id=tender_file_id))
-            logger.info(f"标书 {tender_file_id} 开始生成图片")
-        
-        # 任务2：解析目录并入库（如果需要）
-        if not has_topics:
-            async def parse_and_index():
-                """解析目录并建立向量索引"""
-                result = await parser_tender_topic(tender_file_id)
-                documents = parser_document(tender_file_id)
-                insert_into_milvus(tender_file_id, result, documents)
-
-            parallel_tasks.append(parse_and_index())
-            logger.info(f"标书 {tender_file_id} 开始解析目录")
-        
         # 并行执行独立任务
-        if parallel_tasks:
-            await asyncio.gather(*parallel_tasks, return_exceptions=True)
-        
+        if not has_images or not has_topics:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                futures = []
+
+                if not has_images:
+                    def do_to_images():
+                        md_parser = MarkDownParser()
+                        return md_parser.to_images(tender_file_id=tender_file_id)
+                    futures.append(executor.submit(do_to_images))
+                    logger.info(f"标书 {tender_file_id} 开始生成图片")
+
+                if not has_topics:
+                    def do_parse_and_index():
+                        result = parser_tender_topic(tender_file_id)
+                        documents = parser_document(tender_file_id)
+                        insert_into_milvus(tender_file_id, result, documents)
+                    futures.append(executor.submit(do_parse_and_index))
+                    logger.info(f"标书 {tender_file_id} 开始解析目录")
+
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.error(f"并行任务失败: {str(e)}")
+
         # 3. 根据任务类型获取匹配的合规规则库
         with app_context.db_session_factory() as session:
             # 根据 task_type 匹配 rule_type
             query = session.query(TenderRuleConfiguration).filter(
                 TenderRuleConfiguration.status == 1
             )
-            
+
             # 如果 task_type 有值，则添加 rule_type 过滤条件
             if task_type is not None:
                 query = query.filter(or_(TenderRuleConfiguration.rule_type == task_type, TenderRuleConfiguration.rule_type ==1))
                 logger.info(f"标书 {tender_file_id} 使用任务类型 {task_type} 匹配规则")
             else:
                 logger.warning(f"标书 {tender_file_id} 的任务类型为 None，将获取所有启用的规则")
-            
+
             rule_list = query.all()
-        
+
         if not rule_list:
             logger.warning(f"标书 {tender_file_id} 没有可用的合规规则（任务类型: {task_type}）")
             return
-        
+
         # 4. 并行执行所有规则检查
         logger.info(f"标书 {tender_file_id} 开始执行 {len(rule_list)} 个合规规则检查")
-        asyncio_tasks = [
-            handle_rule(rule, tender_file_id,
-                        sub_compliance_check_task_id,
-                        bid_plagiarism_check_task_id)
-            for rule in rule_list
-        ]
-        
-        # 使用 gather 并行执行，并捕获异常避免单个规则失败影响整体
-        await asyncio.gather(*asyncio_tasks, return_exceptions=True)
-        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [
+                executor.submit(handle_rule, rule, tender_file_id,
+                              sub_compliance_check_task_id,
+                              bid_plagiarism_check_task_id)
+                for rule in rule_list
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"规则检查失败: {str(e)}")
+
         logger.info(f"标书 {tender_file_id} 合规验证完成")
-    
+
     except Exception as e:
         logger.error(f"标书 {tender_file_id} 合规验证异常: {str(e)}", exc_info=True)
         raise
 
 
-async def parser_tender_topic(tender_file_id):
+def parser_tender_topic(tender_file_id):
     logger.info(f"parser_tender_topic-{tender_file_id}开始")
     with app_context.db_session_factory() as session:
         tender_pdf_image_list = session.query(TenderPDFImageEntity)\
@@ -623,29 +634,88 @@ async def parser_tender_topic(tender_file_id):
         for image in tender_pdf_image_list:
             if image.page_context:
                 context += image.page_context
+
+        if not context.strip():
+            logger.warning(f"未找到有效的页面文本内容 file_id={tender_file_id}")
+            return []
+
         agent_model = AppContext().agent_model
         agent = create_agent(
             agent_model,
             system_prompt='''
             # Role
             你是一名文档目录审核专家，用于提取文档目录内容
-            
+
             # Context
             根据输入内容分析出文档的一级目录
-            
+
             # Few-Shot Examples
             ## Example 1 (符合要求)
             Input: 帮我分析出内容中的一级目录。
-            Output: {'topics': [{'topic_name':'投标函'},{'topic_name':'投标保证金'}]}    
+            Output: {'topics': [{'topic_name':'投标函'},{'topic_name':'投标保证金'}]}
             ''',
             response_format=TopicListFormat,
         )
 
-        response = await agent.ainvoke({"messages": [HumanMessage(context)]})
+        response = agent.invoke({"messages": [HumanMessage(context)]})
         topic_formatted: TopicListFormat = response['structured_response']
         topic_list = [topic.topic_name for topic in topic_formatted.topics]
         logger.info(f"parser_tender_topic-{tender_file_id}结束")
         return topic_list
+
+
+def parser_tender_topic_from_documents(documents: HFiledocument, tender_file_id: int):
+    """
+    从HFiledocument文档对象中提取目录（适用于Word等无法转图片的格式）
+
+    :param documents: 解析后的文档对象链表
+    :param tender_file_id: 文件ID
+    :return: 目录列表
+    """
+    logger.info(f"parser_tender_topic_from_documents-{tender_file_id}开始")
+
+    context = ""
+    page_count = 0
+
+    current_doc = documents
+    while current_doc and page_count < 8:
+        if current_doc.page_content:
+            context += current_doc.page_content + "\n"
+            page_count += 1
+        current_doc = current_doc.next
+
+    if not context.strip():
+        logger.warning(f"文档内容为空 file_id={tender_file_id}")
+        return []
+
+    try:
+        agent_model = AppContext().agent_model
+        agent = create_agent(
+            agent_model,
+            system_prompt='''
+            # Role
+            你是一名文档目录审核专家，用于提取文档目录内容
+
+            # Context
+            根据输入内容分析出文档的一级目录
+
+            # Few-Shot Examples
+            ## Example 1 (符合要求)
+            Input: 帮我分析出内容中的一级目录。
+            Output: {'topics': [{'topic_name':'投标函'},{'topic_name':'投标保证金'}]}
+            ''',
+            response_format=TopicListFormat,
+        )
+
+        response = agent.invoke({"messages": [HumanMessage(context)]})
+        topic_formatted: TopicListFormat = response['structured_response']
+        topic_list = [topic.topic_name for topic in topic_formatted.topics]
+        logger.info(f"parser_tender_topic_from_documents-{tender_file_id}结束，提取到{len(topic_list)}个目录")
+        return topic_list
+
+    except Exception as e:
+        logger.error(f"从文档提取目录失败 file_id={tender_file_id}: {str(e)}", exc_info=True)
+        return []
 
 
 def parser_document(tender_file_id):
@@ -654,57 +724,106 @@ def parser_document(tender_file_id):
         file_record = session.get(FileRecordEntity, tender_file_id)
         file_path = file_record.file_path
         business_id = file_record.business_id
+        mime_type = file_record.mime_type.lower()
+        
         minio_client = app_context.minio_client
         with minio_client.get_object(business_id, file_path) as response:
-            file_data = response.read()  # 自动 close + release_conn
-        pdf_stream = BytesIO(file_data)
-        md_parser = MarkDownParser()
-        documents = md_parser.parse(stream=pdf_stream, file_id=tender_file_id)
+            file_data = response.read()
+        
+        file_stream = BytesIO(file_data)
+        
+        is_word_format = mime_type in [
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/msword",
+            ".docx",
+            ".doc"
+        ]
+        
+        if is_word_format:
+            logger.info(f"检测到Word格式文件，使用DocParser解析 file_id={tender_file_id}")
+            doc_parser = DocParser()
+            documents = doc_parser.parse(stream=file_stream, file_id=tender_file_id)
+        else:
+            logger.info(f"检测到PDF格式文件，使用MarkDownParser解析 file_id={tender_file_id}")
+            md_parser = MarkDownParser()
+            documents = md_parser.parse(stream=file_stream, file_id=tender_file_id)
+    
     logger.info(f"解析标书-{tender_file_id}结束")
     return documents
 
 
-def insert_into_milvus(tender_file_id, topics, documents: HFiledocument):
-    md_parser = MarkDownParser()
+def insert_into_milvus(tender_file_id, topics, documents: HFiledocument, is_word_format: bool = False):
+    """
+    将解析后的文档插入Milvus向量数据库
+    
+    :param tender_file_id: 文件ID
+    :param topics: 目录列表
+    :param documents: 解析后的文档对象
+    :param is_word_format: 是否为Word格式（默认False，即PDF格式）
+    :return: 目录数据列表
+    """
+    logger.info(f"标书-{tender_file_id}开始入库处理 (Word格式: {is_word_format})")
+    
+    # 根据文件格式选择合适的解析器进行切片
+    if is_word_format:
+        from apps.document_parser.doc_parser import DocParser
+        parser = DocParser()
+        logger.info(f"使用DocParser进行切片 file_id={tender_file_id}")
+    else:
+        from apps.document_parser.markdown_parser import MarkDownParser
+        parser = MarkDownParser()
+        logger.info(f"使用MarkDownParser进行切片 file_id={tender_file_id}")
+    
     logger.info(f"标书-{tender_file_id}切片开始")
-    chunk_list: List[HDocument] = md_parser.overlapping_splitting(documents)
-    logger.info(f"标书-{tender_file_id}切片结束")
+    chunk_list: List[HDocument] = parser.overlapping_splitting(documents)
+    logger.info(f"标书-{tender_file_id}切片结束，共{len(chunk_list)}个片段")
+    
     topics_com = list(zip(topics, topics[1:]))
     data_list = []
-    prefix_pattern = r'(?:[（(]?[一二三四五六七八九十百千万]+[）)]?、?|[0-9]+[.)、]|[（(][0-9]+[）)]?)'
+
+    # 预收集所有标题行：(标题文本, 所属页码)
+    heading_lines: list[tuple[str, int]] = []
+    for document in documents:
+        if not document.page_content:
+            continue
+        for line in document.page_content.split('\n'):
+            line = line.strip()
+            if is_heading(line):
+                heading_lines.append((line, document.page))
+
     for topic_com in topics_com:
         topic_start, topic_end = topic_com
-
-        # 1. 安全转义关键词
         safe_keyword_start = re.escape(topic_start)
         safe_keyword_end = re.escape(topic_end)
-
-        pattern = rf'^(({prefix_pattern}\s*{safe_keyword_start})(?!.*\d$).*)$'
-        pattern2 = rf'^(({prefix_pattern}\s*{safe_keyword_end})(?!.*\d$).*)$'
         start_page = None
         end_page = None
-        for document in documents:
-            if document.page_content:
-                result_list = document.page_content.split('\n')
-                if re.match(pattern, result_list[0]):
-                    start_page = document.page
-                if re.match(pattern2, result_list[0]):
-                    end_page = document.page
-                if start_page and end_page and end_page > start_page:
-                    break
+
+        for heading, page in heading_lines:
+            if start_page is None and re.search(safe_keyword_start, heading):
+                start_page = page
+            if end_page is None and re.search(safe_keyword_end, heading):
+                end_page = page
+            if start_page and end_page and end_page > start_page:
+                break
+
         data_list.append({"topic_content": topic_start, "start_page": start_page, "end_page": end_page,
                           "tender_file_id": tender_file_id})
-    end_topic = topics[-1]
-    end_topic_document = documents[-1]
-    end_topic_page = end_topic_document.page
-    start_topic_page = data_list[-1]["end_page"]
-    data_list.append({"topic_content": end_topic, "start_page": start_topic_page, "end_page": end_topic_page,
-                      "tender_file_id": tender_file_id})
+    
+    # 处理最后一个目录
+    if topics:
+        end_topic = topics[-1]
+        end_topic_document = documents[-1] if documents else None
+        end_topic_page = end_topic_document.page if end_topic_document else 0
+        start_topic_page = data_list[-1]["end_page"] if data_list else 0
+        data_list.append({"topic_content": end_topic, "start_page": start_topic_page, "end_page": end_topic_page,
+                          "tender_file_id": tender_file_id})
+    
     data_topic_list = []
     data_topic_content_list = []
     data_topic_start_page_list = []
     data_topic_end_page_list = []
     data_topic_tender_file_id_list = []
+    
     # 遍历每个主题数据
     for data in data_list:
         start_page = data.get("start_page", 0)
@@ -718,10 +837,13 @@ def insert_into_milvus(tender_file_id, topics, documents: HFiledocument):
         data_topic_start_page_list.append(start_page)
         data_topic_end_page_list.append(end_page)
         data_topic_tender_file_id_list.append(data["tender_file_id"])
+        
+        # 为切片分配所属目录
         for chunk in chunk_list:
             if chunk.page:
                 if start_page <= chunk.page <= end_page:
                     chunk.topic = topic_content
+        
         data_topic_list.append(
             TenderTopic(
                     topic_name=topic_content,
@@ -731,36 +853,44 @@ def insert_into_milvus(tender_file_id, topics, documents: HFiledocument):
 
     logger.info(f"标书-{tender_file_id}一级目录入数据库")
     embedding = AppContext().embedding_vectorizer
+    
     # 目录入数据库
     if len(data_topic_list) > 0:
         with app_context.db_session_factory() as session:
             session.add_all(data_topic_list)
             session.commit()
+        
         # 目录入向量库
-        logger.info(f"标书-{tender_file_id}一级目录入向量库库")
+        logger.info(f"标书-{tender_file_id}一级目录入向量库")
         topic_ems = embedding.encode_group(data_topic_content_list)
         topic_vector_milvus_db = create_tender_topic_vector_milvus_db(embedding.get_vector_dim())
         topic_vector_milvus_db.insert_info([data_topic_content_list, data_topic_start_page_list,
                                             data_topic_end_page_list, data_topic_tender_file_id_list,
                                             topic_ems])
+    
     logger.info(f"标书-{tender_file_id}向量化入库开始")
     file_ids = []
     pages = []
     start_index_list = []
     texts = []
-    topics = []
+    topic_list = []
+    
     for chunk in chunk_list:
         if chunk.topic:
             file_ids.append(chunk.file_id)
             pages.append(chunk.page)
             start_index_list.append(chunk.start_index)
             texts.append(chunk.text)
-            topics.append(chunk.topic)
-    all_ems = embedding.encode_group(texts)
-    milvus_vector_db = create_tender_vector_milvus_db(embedding.get_vector_dim())
-    vec_lis = all_ems
-    milvus_vector_db.insert_info([file_ids, pages, start_index_list, texts, vec_lis, topics])
-    logger.info(f"标书-{tender_file_id}向量化入库结束")
+            topic_list.append(chunk.topic)
+    
+    if texts:
+        all_ems = embedding.encode_group(texts)
+        milvus_vector_db = create_tender_vector_milvus_db(embedding.get_vector_dim())
+        milvus_vector_db.insert_info([file_ids, pages, start_index_list, texts, all_ems, topic_list])
+        logger.info(f"标书-{tender_file_id}向量化入库结束，共{len(texts)}个文本片段")
+    else:
+        logger.warning(f"标书-{tender_file_id}没有有效的文本片段，跳过向量入库")
+    
     return data_list
 
 

@@ -2,11 +2,12 @@ from typing import Union
 
 
 class HFiledocument:
-    def __init__(self, file_id, page, page_content):
+    def __init__(self, file_id, page, page_content = None, page_index = 1):
         self.file_id = file_id
         self.page = page
         self.page_content = page_content
-        self.next: HFiledocument = None
+        self.next: HFiledocument
+        self.page_index = page_index
 
     def __iter__(self):
         # 返回一个新的迭代器对象（不是自己！）
@@ -53,9 +54,10 @@ class HFileDocumentIterator:
 
 
 class HDocument:
-    def __init__(self, file_id, page, start_index, text, topic=""):
+    def __init__(self, file_id, page, start_index, text, topic="", page_index = 1):
         self.file_id = file_id
         self.page = page
         self.start_index = start_index
         self.text: str = text
         self.topic = topic
+        self.page_index = page_index

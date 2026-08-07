@@ -21,10 +21,46 @@ logger = get_logger(name=__name__)
 tender_router = APIRouter(prefix="/api/tender", tags=["标书"])
 
 
-@tender_router.post("/tender_check", response_model=BaseResponse)
+@tender_router.post("/tender_check", response_model=BaseResponse, summary="创建标书检测任务")
 async def tender_check(tender_task_dto: TenderTaskDto, background_tasks: BackgroundTasks):
     """
-    标书检测
+    标书检测接口
+    
+    **功能说明：**
+    - 支持查重检测和合规检测两种模式
+    - 后台异步执行，立即返回任务创建结果
+    - 检测过程包括：文件解析、向量化、相似度比对/规则检查
+    
+    **检测类型：**
+    - check_type = 1: 查重检测（对比多份标书之间的相似度）
+    - check_type = 2: 合规检测（检查标书是否符合规范要求）
+    
+    **处理流程：**
+    1. 注册检测任务到数据库
+    2. 后台异步解析标书文件（PDF/Word）
+    3. 提取文本并生成向量
+    4. 执行相似度比对或合规规则检查
+    5. 更新任务状态和检测结果
+    
+    **请求参数示例：**
+    
+    ```
+    {
+      "check_type": 1,
+      "files": [
+        {
+          "file_id": "file1",
+          "file_name": "标书1.pdf",
+          "file_type": "pdf"
+        },
+        {
+          "file_id": "file2",
+          "file_name": "标书2.docx",
+          "file_type": "docx"
+        }
+      ]
+    }
+    ```
     """
     bid_plagiarism_check(tender_task_dto, background_tasks)
     return BaseResponse.success()
@@ -79,14 +115,16 @@ async def batch_update_tender_similarity_info_id(ids: BatchIds):
 async def export_similarity_report_by_task_id(task_id):
     buffer = await asyncio.to_thread(export_similarity_report_task_id, task_id)
     # file_id, url = await upload_file_bytes(buffer.read(), "xlsx", "report")
-    filename = f"similarity_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    filename = f"报告导出.xlsx"
+    from urllib.parse import quote
+    encoded_filename = quote(filename.encode('utf-8'))
     from fastapi.responses import StreamingResponse
     # 5. 返回 FileResponse
     return StreamingResponse(
         content=buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={
-            "Content-Disposition": f'attachment; filename*=UTF-8\'\'{filename}'
+            "Content-Disposition": f'attachment; filename*=UTF-8\'\'{encoded_filename}'
         }
     )
     # return BaseResponse.success(url)

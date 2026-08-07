@@ -18,79 +18,58 @@ class MarkDownParser(BaseParser):
     def overlapping_splitting(self, file_document: HFiledocument, chunk_size: int = 2000, overlap: int = 100)\
             -> List[HDocument]:
         """
-        重叠切片逻辑，将长文本内容切割成不同的小段，选择重叠切片，真强语义的连贯性
+        重叠切片逻辑，将长文本内容切割成不同的小段，选择重叠切片，增强语义的连贯性
         :param file_document: pdf解析后的文件数据
         :param chunk_size: 切片大小
-        :type chunk_size: int
         :param overlap: 重叠部分的长度
-        :type overlap: int
         :return: 返回字符串数组，为切好的多片段数据
-        :rtype: list[str]
         """
         documents: list[HDocument] = []
-        topic = ""
-        pattern = r'^# (?:（?[一二三四五六七八九]+十[一二三四五六七八九]+）?、?|[0-9]+[.)、]|（[0-9]+）)?\s*.*$'
+        # 句末标点：只在这些符号处切分，保证每段都是完整句子
+        end_punctuations: str = r'。！？；'
         for page_document in file_document:
             text_content = page_document.page_content
-            # 根据换行符来切分文件
-            text_chunks = text_content.split('\n')
-            for text in text_chunks:
+            text_lines = text_content.split('\n')
+            for text in text_lines:
                 text = re.sub(r'\s+', ' ', text).strip()
-                #text = self.clean_text(text)
                 if len(text) < 1:
                     continue
-                punctuations: str = r'，  。！？；'
                 text_length = len(text)
                 current_start = 0
-                match_topic = re.match(pattern, text)
-                if match_topic:
-                    topic = text
                 if text_length <= chunk_size:
-                    document = HDocument(page_document.file_id, page_document.page, current_start, text[current_start:], topic)
+                    document = HDocument(page_document.file_id, page_document.page, current_start, text[current_start:])
                     documents.append(document)
                     continue
-                # 编译正则：匹配任意结束标点（用于快速查找）
-                punctuation_pattern = re.compile(f'[{punctuations}]')
-                chunks = []
+                punctuation_pattern = re.compile(f'[{end_punctuations}]')
+                prev_start = -1
 
                 while current_start < text_length:
-                    # 1. 计算目标结束位置（当前起始 + 目标长度）
                     target_end = current_start + chunk_size
 
-                    # 2. 处理边界：如果目标结束超过文本长度，直接取剩余部分
                     if target_end >= text_length:
-                        chunks.append(text[current_start:])
-                        document = HDocument(page_document.file_id, page_document.page, current_start,
-                                             text[current_start:], topic)
+                        document = HDocument(page_document.file_id, page_document.page, current_start, text[current_start:])
                         documents.append(document)
                         break
 
-                    # 3. 检查目标结束位置是否是标点
-                    if text[target_end] in punctuations:
-                        split_end = target_end + 1  # 包含标点
+                    if text[target_end] in end_punctuations:
+                        split_end = target_end + 1
                     else:
-                        # 4. 向后找最近的标点（最多搜索200字符，避免无标点极端情况）
-                        match = punctuation_pattern.search(text, target_end, target_end + 200)
+                        match = punctuation_pattern.search(text, target_end)
                         if match:
-                            split_end = match.end()  # 匹配到的标点结束位置
+                            split_end = match.end()
                         else:
-                            # 兜底：找不到标点则按目标长度切分
                             split_end = target_end
 
-                    # 5. 截取当前块并加入列表
                     current_chunk = text[current_start:split_end]
-                    chunks.append(current_chunk)
-                    document = HDocument(page_document.file_id, page_document.page, current_start, current_chunk, topic)
+                    document = HDocument(page_document.file_id, page_document.page, current_start, current_chunk)
                     documents.append(document)
-                    # 6. 更新下一块的起始位置（当前结束 - 重叠长度）
                     current_start = split_end - overlap
 
-                    # 防护：避免起始位置回退过多（比如重叠长度大于当前块）
                     if current_start < 0:
                         current_start = 0
-                    # 防护：避免死循环（相邻起始位置无变化）
-                    if current_start >= text_length or (len(chunks) >= 2 and current_start == chunks[-2]):
+                    if current_start >= text_length or current_start == prev_start:
                         break
+                    prev_start = current_start
 
         return documents
 
@@ -180,6 +159,7 @@ class MarkDownParser(BaseParser):
         
         for page_idx, item_list in grouped.items():
             text = ""
+            page_index = 1
             for item in item_list:
                 content_type = item["type"]
                 content_text = ""

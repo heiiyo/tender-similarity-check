@@ -109,7 +109,7 @@ def md_parser_test():
 def mineru266(file_path=None, data_stream=None):
     text = ""
     mineru_config = AppContext().mineru_config
-    url = mineru_config['url']
+    url = mineru_config['nodes'][0]['url']
     data = {
         'server_url': 'http://vllm-server:8000',
         "backend": "vlm-http-client",

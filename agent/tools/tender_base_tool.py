@@ -144,15 +144,23 @@ def analyze_tender_page_with_ocr(bid_id: int, page_numbers: List[int], user_inte
 
 
 @tool
-def query_tender_topic(bid_id, keyword):
+def query_tender_topic(bid_id, keywords):
     """
-    查询关键字是否在目录中存在
+    查询多个关键字是否在目录中存在，返回匹配的页码列表
+
     :param bid_id: 要查询的标书的唯一数字ID（tender_file_id）。
-    :param keyword: 要搜索的关键词。
+    :param keywords: 要搜索的关键词列表，可以是单个字符串或字符串列表。例如："资质证书" 或 ["资质证书", "营业执照", "安全生产许可证"]
     :return: 一个字典，包含以下键值对：
-             - page_number (List[int]): 匹配关键词的页码列表
+             - page_number (List[int]): 匹配关键词的页码列表（去重并排序）
+
+             例如：{"page_number": [3, 4, 5, 10, 11, 12]}
     """
-    logger.info(f"query_tender_topic: {bid_id}, {keyword}")
+    logger.info(f"query_tender_topic: {bid_id}, {keywords}")
+
+    # 将单个字符串转换为列表
+    if isinstance(keywords, str):
+        keywords = [keywords]
+
     try:
         import re
         app_context = AppContext()
@@ -161,118 +169,155 @@ def query_tender_topic(bid_id, keyword):
             topics = session.query(TenderTopic).filter(
                 TenderTopic.tender_file_id == bid_id
             ).order_by(TenderTopic.start_page.asc()).all()
-            
+
             if not topics:
                 return {"page_number": []}
-            
-            # 遍历每一个目录项，搜索关键词
-            matched_pages = []
+
+            # 收集所有匹配的页码
+            matched_pages = set()
+
+            # 遍历每一个目录项，搜索所有关键词
             for topic in topics:
                 if not topic.topic_name:
                     continue
-                
+
                 # 清理文本：去除多余空白字符
                 clean_topic_name = re.sub(r'\s+', ' ', topic.topic_name.strip())
-                clean_keyword = re.sub(r'\s+', ' ', keyword.strip())
-                
-                # 方法1：直接匹配（清理空白后）
-                if clean_keyword.lower() in clean_topic_name.lower():
-                    # 如果找到匹配，添加起始页码
-                    if topic.start_page:
-                        try:
-                            start_page = int(topic.start_page)
-                            matched_pages.append(start_page)
-                        except ValueError:
-                            pass
-                    continue
-                
-                # 方法2：使用正则表达式模糊匹配（处理可能的分隔符）
-                pattern_parts = [re.escape(char) for char in clean_keyword]
-                flexible_pattern = r'\s*'.join(pattern_parts)
-                
-                if re.search(flexible_pattern, topic.topic_name, re.IGNORECASE):
-                    if topic.start_page:
-                        try:
-                            start_page = int(topic.start_page)
-                            matched_pages.append(start_page)
-                        except ValueError:
-                            pass
-                    continue
-            
-            # 去重并排序
-            matched_pages = sorted(list(set(matched_pages)))
-            return {"page_number": matched_pages}
-    
+
+                # 检查是否匹配任意一个关键词
+                is_matched = False
+                for keyword in keywords:
+                    if not keyword:
+                        continue
+
+                    clean_keyword = re.sub(r'\s+', ' ', keyword.strip())
+
+                    # 方法1：直接匹配（清理空白后）
+                    if clean_keyword.lower() in clean_topic_name.lower():
+                        is_matched = True
+                        break
+
+                    # 方法2：使用正则表达式模糊匹配（处理可能的分隔符）
+                    pattern_parts = [re.escape(char) for char in clean_keyword]
+                    flexible_pattern = r'\s*'.join(pattern_parts)
+
+                    if re.search(flexible_pattern, topic.topic_name, re.IGNORECASE):
+                        is_matched = True
+                        break
+
+                # 如果找到匹配，添加该目录项对应的所有页码
+                if is_matched and topic.start_page:
+                    try:
+                        start_page = int(topic.start_page)
+                        end_page = int(topic.end_page) if topic.end_page else start_page
+
+                        # 生成从 start_page 到 end_page 的所有页码
+                        for page_num in range(start_page, end_page + 1):
+                            matched_pages.add(page_num)
+                    except ValueError:
+                        pass
+
+            # 转换为排序后的列表
+            matched_pages_list = sorted(list(matched_pages))
+            logger.info(f"标书 {bid_id} 目录查询完成，共匹配 {len(matched_pages_list)} 个页码")
+            return {"page_number": matched_pages_list}
+
     except Exception as e:
-        print(f"查询标书 {bid_id} 目录关键词 '{keyword}' 失败: {str(e)}")
+        print(f"查询标书 {bid_id} 目录关键词 {keywords} 失败: {str(e)}")
         return {"page_number": []}
 
 
 @tool
-def query_tender_keyword(bid_id: int, keyword: str, page_number_list: List[int] = None):
+def query_tender_keyword(bid_id: int, keywords, page_number_list: List[int] = None):
     """
-    用于查询标书内容中指定的关键词出现的页码。
+    用于查询标书内容中指定的一个或多个关键词出现的页码。
 
     :param bid_id: 要查询的标书的唯一数字ID（tender_file_id）。
-    :param keyword: 要搜索的关键词。
-    :param page_number_list: 需要在哪些中查找关键字keyword。 如果全文搜索，默认为None,空
+    :param keywords: 要搜索的关键词，可以是单个字符串或字符串列表。例如："资质证书" 或 ["资质证书", "营业执照", "安全生产许可证"]
+    :param page_number_list: 需要在哪些页中查找关键字keywords。如果全文搜索，默认为None或空列表
     :return: 一个字典，包含以下键值对：
-             - page_number (List[int]): 匹配关键词的页码列表
+             - page_number (List[int]): 匹配任意关键词的页码列表（去重并排序）
+
+             例如：{"page_number": [3, 5, 8, 12, 15]}
     """
+    # 将单个字符串转换为列表
+    if isinstance(keywords, str):
+        keywords = [keywords]
+
+    logger.info(f"query_tender_keyword: {bid_id}, keywords={keywords}, page_number_list={page_number_list}")
+
     try:
         import re
         app_context = AppContext()
         with app_context.db_session_factory() as session:
             # 根据 tender_file_id 查询所有页面的内容
             pages = None
-            if page_number_list:
+            if page_number_list and len(page_number_list) > 0:
                 pages = session.query(TenderPDFImageEntity).filter(
                     TenderPDFImageEntity.tender_file_id == bid_id,
                     TenderPDFImageEntity.page_number.in_(page_number_list)
-                )
+                ).order_by(TenderPDFImageEntity.page_number.asc()).all()
             else:
                 pages = session.query(TenderPDFImageEntity).filter(
                     TenderPDFImageEntity.tender_file_id == bid_id
                 ).order_by(TenderPDFImageEntity.page_number.asc()).all()
+
             if not pages:
                 return {"page_number": []}
-            
-            # 遍历每一页，搜索关键词
-            matched_pages = []
+
+            # 使用集合收集所有匹配的页码，自动去重
+            matched_pages = set()
+
+            # 遍历每一页，搜索所有关键词
             for page in pages:
                 if not page.page_context:
                     continue
-                
+
                 # 清理文本：去除多余空白字符，统一换行符
                 clean_text = re.sub(r'\s+', ' ', page.page_context.strip())
-                clean_keyword = re.sub(r'\s+', ' ', keyword.strip())
-                print(f"clean_text-{clean_text}, clean_keyword-{clean_keyword}")
-                # 方法1：直接匹配（清理空白后）
-                if clean_keyword in clean_text:
-                    matched_pages.append(page.page_number)
-                    continue
-                
-                # 方法2：使用正则表达式模糊匹配（处理可能的分隔符）
-                # 将关键词中的每个字符之间允许有任意空白字符
-                pattern_parts = [re.escape(char) for char in clean_keyword]
-                flexible_pattern = r'\s*'.join(pattern_parts)
-                
-                if re.search(flexible_pattern, page.page_context):
-                    matched_pages.append(page.page_number)
-                    continue
-                
-                # 方法3：分词匹配（适用于长关键词）
-                # 如果关键词包含多个词，检查是否所有词都出现在文本中
-                if len(clean_keyword) > 4:
-                    # 按常见分隔符分割关键词
-                    keyword_parts = re.split(r'[，,、\s]+', clean_keyword)
-                    if all(part in clean_text for part in keyword_parts if len(part) > 1):
-                        matched_pages.append(page.page_number)
-            
-            return {"page_number": matched_pages}
-    
+
+                # 检查是否匹配任意一个关键词
+                is_matched = False
+                for keyword in keywords:
+                    if not keyword:
+                        continue
+
+                    clean_keyword = re.sub(r'\s+', ' ', keyword.strip())
+
+                    # 方法1：直接匹配（清理空白后）
+                    if clean_keyword.lower() in clean_text.lower():
+                        is_matched = True
+                        break
+
+                    # 方法2：使用正则表达式模糊匹配（处理可能的分隔符）
+                    # 将关键词中的每个字符之间允许有任意空白字符
+                    pattern_parts = [re.escape(char) for char in clean_keyword]
+                    flexible_pattern = r'\s*'.join(pattern_parts)
+
+                    if re.search(flexible_pattern, page.page_context, re.IGNORECASE):
+                        is_matched = True
+                        break
+
+                    # 方法3：分词匹配（适用于长关键词）
+                    # 如果关键词包含多个词，检查是否所有词都出现在文本中
+                    if len(clean_keyword) > 4:
+                        # 按常见分隔符分割关键词
+                        keyword_parts = re.split(r'[，,、\s]+', clean_keyword)
+                        if all(part.lower() in clean_text.lower() for part in keyword_parts if len(part) > 1):
+                            is_matched = True
+                            break
+
+                # 如果任意一个关键词匹配成功，添加该页码
+                if is_matched:
+                    matched_pages.add(page.page_number)
+
+            # 转换为排序后的列表
+            matched_pages_list = sorted(list(matched_pages))
+            logger.info(f"标书 {bid_id} 关键词查询完成，共匹配 {len(matched_pages_list)} 个页码")
+            return {"page_number": matched_pages_list}
+
     except Exception as e:
-        print(f"查询标书 {bid_id} 关键词 '{keyword}' 失败: {str(e)}")
+        logger.error(f"查询标书 {bid_id} 关键词 {keywords} 失败: {str(e)}", exc_info=True)
         return {"page_number": []}
 
 

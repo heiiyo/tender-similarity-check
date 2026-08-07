@@ -101,10 +101,11 @@ def validate_vector_config(config: Dict) -> bool:
     
     return True
 
-
+active = os.getenv("ACTIVE", "dev")
 yaml_handler = YamlHandler(encoding="utf-8")
 data_config = yaml_handler.read_yaml("application.yml")
-print(data_config)
+if active == "prod":
+    data_config = yaml_handler.read_yaml("application-prod.yml")
 milvus_config = data_config["milvus"]
 minio_config = data_config["minio"]
 mysql_config = data_config["mysql"]
@@ -112,6 +113,7 @@ llm_model_config = data_config["llm_model"]
 embedding_config = data_config["embedding"]
 mineru_config = data_config["mineru"]
 orc_model_config = data_config["orc_model"]
+tender_check_config = data_config.get("tender_check", {})
 
 
-__all__ = ["data_config", "milvus_config", "minio_config", "mysql_config", "embedding_config", "llm_model_config", "mineru_config", "orc_model_config"]
+__all__ = ["data_config", "milvus_config", "minio_config", "mysql_config", "embedding_config", "llm_model_config", "mineru_config", "orc_model_config", "tender_check_config"]

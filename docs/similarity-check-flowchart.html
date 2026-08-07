@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>标书查重逻辑流程图</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface: #fcfcfb; --page: #f9f9f7; --text: #0b0b0b; --text2: #52514e; --muted: #898781;
+    --border: rgba(11,11,11,0.08);
+    --stage-bg: #2a78d6;    --stage-tx: #fff;
+    --storage-bg: #008300;  --storage-tx: #fff;
+    --branch-bg: #e34948;   --branch-tx: #fff;
+    --algo-bg: #7b2d8b;     --algo-tx: #fff;
+    --concur-bg: #0e8c8c;   --concur-tx: #fff;
+    --struct-bg: #c5521a;   --struct-tx: #fff;
+    --filter-bg: #f9f4e8;   --filter-stroke: #e8d5a3;
+    --arrow: #c3c2b7;        --dash: #d9d8d2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface: #1a1a19; --page: #0d0d0d; --text: #fff; --text2: #c3c2b7; --muted: #898781;
+      --border: rgba(255,255,255,0.08); --filter-bg: #2a2618; --filter-stroke: #4a4020;
+      --arrow: #4a4a45; --dash: #3a3a35;
+      --algo-bg: #5b1d6b; --concur-bg: #0a6e6e; --struct-bg: #9e3f14;
+    }
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--page); color: var(--text); min-height: 100vh; padding: 32px 16px; }
+  .container { max-width: 1060px; margin:0 auto; }
+  header { text-align:center; margin-bottom:20px; }
+  header h1 { font-size:24px; font-weight:700; letter-spacing:-0.01em; margin-bottom:3px; }
+  header p  { font-size:13px; color:var(--text2); }
+  .canvas-wrap { background: var(--surface); border-radius: 12px; border: 1px solid var(--border); overflow-x: auto; padding: 12px 0; }
+  svg { display:block; margin:0 auto; }
+  svg text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .legend { display:flex; gap:20px; justify-content:center; flex-wrap:wrap; margin-top:16px; font-size:12px; color:var(--text2); }
+  .legend span { display:flex; align-items:center; gap:6px; }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:3px; flex-shrink:0; }
+  .legend i.s { background:var(--stage-bg); } .legend i.db { background:var(--storage-bg); }
+  .legend i.br { background:var(--branch-bg); } .legend i.ag { background:var(--algo-bg); }
+  .legend i.cc { background:var(--concur-bg); } .legend i.st { background:var(--struct-bg); }
+  footer { text-align:center; margin-top:16px; font-size:11px; color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="container">
+<header>
+  <h1>标书文本查重 — 多任务并发架构</h1>
+  <p>3~5 任务 × 3 标书/任务 · 纯扫描件 · 目录恢复 · 章节+页码级定位</p>
+</header>
+<div class="canvas-wrap">
+<svg viewBox="0 0 1040 2020" width="1040" height="2020" xmlns="http://www.w3.org/2000/svg">
+
+  <defs>
+    <filter id="sh" x="-4%" y="-4%" width="108%" height="112%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.10"/></filter>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9" fill="#898781"/></marker>
+    <marker id="ad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9" fill="#c3c2b7"/></marker>
+  </defs>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!--  CONSTANTS: x-col layout                             -->
+  <!--  Left gutter=40, Main col=140, Wide body=140~960    -->
+  <!--  Right side services: x=870 (MinIO, MySQL, MinerU)  -->
+  <!-- ═══════════════════════════════════════════════════ -->
+
+  <!-- ===== STAGE LABELS (left gutter) ===== -->
+  <text x="36" y="56"  font-size="15" font-weight="700" fill="var(--text)">① 上传</text>
+  <text x="36" y="188" font-size="15" font-weight="700" fill="var(--text)">② 任务</text>
+  <text x="36" y="330" font-size="15" font-weight="700" fill="var(--text)">③ 解析</text>
+  <text x="36" y="980" font-size="15" font-weight="700" fill="var(--text)">④ 目录</text>
+  <text x="36" y="1175" font-size="15" font-weight="700" fill="var(--text)">⑤ 切分</text>
+  <text x="36" y="1370" font-size="15" font-weight="700" fill="var(--text)">⑥ 比对</text>
+  <text x="36" y="1630" font-size="15" font-weight="700" fill="var(--text)">⑦ 结果</text>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!--  ROW 1: 文件上传                                      -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="140" y="32" width="200" height="50" rx="8" fill="var(--stage-bg)" filter="url(#sh)"/>
+  <text x="240" y="54" text-anchor="middle" fill="var(--stage-tx)" font-size="14" font-weight="600">📄 文件上传</text>
+  <text x="240" y="73" text-anchor="middle" fill="var(--stage-tx)" font-size="10" opacity="0.9">PDF / DOC / ZIP</text>
+
+  <!-- Side services -->
+  <rect x="480" y="32" width="150" height="50" rx="8" fill="var(--storage-bg)" filter="url(#sh)"/>
+  <text x="555" y="54" text-anchor="middle" fill="var(--storage-tx)" font-size="14" font-weight="600">🗄 MinIO</text>
+  <text x="555" y="73" text-anchor="middle" fill="var(--storage-tx)" font-size="10" opacity="0.9">对象存储</text>
+
+  <rect x="700" y="32" width="150" height="50" rx="8" fill="var(--storage-bg)" filter="url(#sh)"/>
+  <text x="775" y="54" text-anchor="middle" fill="var(--storage-tx)" font-size="14" font-weight="600">🗄 MySQL</text>
+  <text x="775" y="73" text-anchor="middle" fill="var(--storage-tx)" font-size="10" opacity="0.9">元数据库</text>
+
+  <!-- Simple horizontal arrows -->
+  <line x1="340" y1="57" x2="476" y2="57" stroke="var(--arrow)" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="408" y="48" text-anchor="middle" fill="var(--muted)" font-size="10">存储文件</text>
+  <line x1="340" y1="57" x2="696" y2="57" stroke="var(--arrow)" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="518" y="44" text-anchor="middle" fill="var(--muted)" font-size="10">写入记录</text>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!--  ROW 2: 任务创建                                      -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="140" y="160" width="240" height="50" rx="8" fill="var(--stage-bg)" filter="url(#sh)"/>
+  <text x="260" y="182" text-anchor="middle" fill="var(--stage-tx)" font-size="12" font-weight="600">📋 任务 ① ⋯ ⑤（并发提交）</text>
+  <text x="260" y="201" text-anchor="middle" fill="var(--stage-tx)" font-size="10" opacity="0.9">各选 3 份不同标书 · 15 份唯一文件</text>
+
+  <rect x="480" y="155" width="300" height="60" rx="8" fill="var(--filter-bg)" stroke="var(--filter-stroke)" stroke-width="1" stroke-dasharray="5,3"/>
+  <text x="630" y="176" text-anchor="middle" fill="#8a6d20" font-size="11" font-weight="700">5 任务 × C(3,2) = 15 子任务</text>
+  <text x="630" y="196" text-anchor="middle" fill="#6b5a18" font-size="10">15 份唯一文件 · 每文件 2 子任务引用 → 15 次解析(非 30 次)</text>
+
+  <line x1="380" y1="185" x2="476" y2="185" stroke="var(--arrow)" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- MySQL → Task (dashed, clean route along side) -->
+  <line x1="775" y1="84" x2="775" y2="128" stroke="var(--dash)" stroke-width="1" stroke-dasharray="5,4"/>
+  <line x1="775" y1="128" x2="382" y2="128" stroke="var(--dash)" stroke-width="1" stroke-dasharray="5,4"/>
+  <line x1="382" y1="128" x2="260" y2="156" stroke="var(--dash)" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#ad)"/>
+  <text x="580" y="122" text-anchor="middle" fill="var(--muted)" font-size="10">读取文件列表</text>
+
+  <!-- Task → PDF解析 (clean straight route) -->
+  <line x1="630" y1="217" x2="630" y2="248" stroke="var(--arrow)" stroke-width="1.5"/>
+  <line x1="630" y1="248" x2="240" y2="248" stroke="var(--arrow)" stroke-width="1.5"/>
+  <line x1="240" y1="248" x2="240" y2="278" stroke="var(--arrow)" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="435" y="242" text-anchor="middle" fill="var(--muted)" font-size="10">子任务进入共享解析管线</text>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!--  ROW 3: PDF 解析（纯扫描件管线）                       -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- Entry nodes -->
+  <rect x="140" y="285" width="200" height="44" rx="8" fill="var(--stage-bg)" filter="url(#sh)"/>
+  <text x="240" y="306" text-anchor="middle" fill="var(--stage-tx)" font-size="13" font-weight="600">📖 打开 PDF → 逐页遍历</text>
+  <text x="240" y="322" text-anchor="middle" fill="var(--stage-tx)" font-size="10" opacity="0.85">fitz.open · 全扫描件 · for page in doc</text>
+
+  <!-- MinIO → Open (clean dashed route) -->
+  <line x1="555" y1="84" x2="555" y2="265" stroke="var(--dash)" stroke-width="1" stroke-dasharray="5,4"/>
+  <line x1="555" y1="265" x2="342" y2="265" stroke="var(--dash)" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#ad)"/>
+  <text x="560" y="180" fill="var(--muted)" font-size="10">拉取文件流</text>
+
+  <!-- Arrow into pipeline -->
+  <line x1="340" y1="307" x2="490" y2="307" stroke="var(--arrow)" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- ═══ SHARED CONCURRENT PIPELINE ═══ -->
+  <rect x="500" y="345" width="520" height="610" rx="8" fill="none" stroke="var(--concur-bg)" stroke-width="2" stroke-dasharray="8,4"/>
+  <text x="760" y="365" text-anchor="middle" fill="var(--concur-bg)" font-size="12" font-weight="700">⚡ 共享并发管线 — ThreadPoolExecutor + asyncio + MinerU×2</text>
+
+  <!-- L1: ThreadPoolExecutor -->
+  <rect x="520" y="380" width="480" height="70" rx="6" fill="#f0f5fa" stroke="#b7cfe0" stroke-width="1"/>
+  <text x="760" y="398" text-anchor="middle" fill="#4a7da8" font-size="11" font-weight="700">🧵 ThreadPoolExecutor（cpu_count × 2）— CPU 密集 · PyMuPDF C 层释放 GIL</text>
+  <rect x="620" y="408" width="280" height="34" rx="5" fill="var(--stage-bg)" filter="url(#sh)"/>
+  <text x="760" y="426" text-anchor="middle" fill="var(--stage-tx)" font-size="11" font-weight="600">🖼 渲染 Worker 池 · PyMuPDF get_pixmap(200DPI)</text>
+  <text x="760" y="444" text-anchor="middle" fill="var(--stage-tx)" font-size="9" opacity="0.8">loop.run_in_executor(pool, render_page)</text>
+
+  <!-- Queue -->
+  <rect x="520" y="462" width="480" height="30" rx="6" fill="#fcf8e7" stroke="#e6d496" stroke-width="1"/>
+  <text x="760" y="480" text-anchor="middle" fill="#8a6d20" font-size="10" font-weight="600">asyncio.Queue(maxsize=50) — 背压控制 · 队列满暂停渲染</text>
+
+  <!-- L2: asyncio -->
+  <rect x="520" y="504" width="480" height="170" rx="6" fill="#f5f0fa" stroke="#c4b7d9" stroke-width="1"/>
+  <text x="760" y="522" text-anchor="middle" fill="#6b3fa0" font-size="11" font-weight="700">⚡ asyncio 协程池 — I/O 密集 · 协程等 HTTP 不占线程</text>
+
+  <rect x="540" y="536" width="210" height="60" rx="5" fill="var(--algo-bg)" filter="url(#sh)"/>
+  <text x="645" y="556" text-anchor="middle" fill="var(--algo-tx)" font-size="11" font-weight="600">asyncio.Semaphore(8)</text>
+  <text x="645" y="574" text-anchor="middle" fill="var(--algo-tx)" font-size="9" opacity="0.85">Consumer 协程 × 8</text>
+  <text x="645" y="590" text-anchor="middle" fill="var(--algo-tx)" font-size="9" opacity="0.85">aiohttp 异步请求</text>
+
+  <rect x="770" y="536" width="210" height="60" rx="5" fill="var(--concur-bg)" filter="url(#sh)"/>
+  <text x="875" y="556" text-anchor="middle" fill="var(--concur-tx)" font-size="11" font-weight="600">MinerU 集群 ×2</text>
+  <text x="875" y="574" text-anchor="middle" fill="var(--concur-tx)" font-size="9" opacity="0.85">GPU 4090 · 1.7 p/s/台</text>
+  <text x="875" y="590" text-anchor="middle" fill="var(--concur-tx)" font-size="9" opacity="0.85">连接池=4/台 · 总计≈3.4p/s</text>
+
+  <line x1="750" y1="566" x2="766" y2="566" stroke="var(--arrow)" stroke-width="1.2"/>
+
+  <text x="760" y="618" text-anchor="middle" fill="#6b3fa0" font-size="9">轮询分发 · 失败重试(×3) · 超时熔断(30s) · 自动切换备用实例</text>
+  <text x="760" y="636" text-anchor="middle" fill="#6b3fa0" font-size="9">背压信号：队列快满 → 暂停上游线程池渲染</text>
+  <text x="760" y="658" text-anchor="middle" fill="#6b3fa0" font-size="9">所有子任务共享同一线程池和协程池 · 全局唯一实例</text>
+
+  <!-- Pipeline output -->
+  <rect x="520" y="686" width="480" height="42" rx="7" fill="var(--stage-bg)" filter="url(#sh)"/>
+  <text x="760" y="706" text-anchor="middle" fill="var(--stage-tx)" font-size="11" font-weight="600">📊 sorted(results, page_num) → 按文档顺序输出的页面文本</text>
+  <text x="760" y="722" text-anchor="middle" fill="var(--stage-tx)" font-size="9" opacity="0.85">每页: {page_num, text, layout_info} · 同时写入 file_id→chunks 缓存</text>
+
+  <!-- Pipeline throughput note -->
+  <rect x="520" y="745" width="480" height="26" rx="5" fill="var(--filter-bg)" stroke="var(--filter-stroke)" stroke-width="0.8"/>
+  <text x="760" y="762" text-anchor="middle" fill="#8a6d20" font-size="10">1000 页渲染≈1.5分 · OCR≈5分 · 15 份文件≈5+74=79分</text>
+
+  <!-- Exit pipeline → next stage -->
+  <line x1="760" y1="957" x2="760" y2="1002" stroke="var(--arrow)" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!--  ROW 4: 目录结构恢复（三阶段）                         -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="140" y="1010" width="880" height="140" rx="8" fill="none" stroke="var(--struct-bg)" stroke-width="2" stroke-dasharray="8,4"/>
+  <text x="580" y="1028" text-anchor="middle" fill="var(--struct-bg)" font-size="12" font-weight="700">④ 目录结构恢复 — 三阶段筛选：Markdown 标题 → 白名单过滤 → 大模型验证</text>
+
+  <!-- Phase boxes side by side -->
+  <rect x="160" y="1042" width="260" height="56" rx="6" fill="var(--stage-bg)" filter="url(#sh)"/>
+  <text x="290" y="1060" text-anchor="middle" fill="var(--stage-tx)" font-size="11" font-weight="600">① MinerU Markdown 初筛</text>
+  <text x="290" y="1078" text-anchor="middle" fill="var(--stage-tx)" font-size="9" opacity="0.9">解析 # / ## / ### 行 → 提取标题文本</text>
+  <text x="290" y="1093" text-anchor="middle" fill="var(--stage-tx)" font-size="9" opacity="0.85">标题 + 所在 page_num → 候选列表</text>
+
+  <rect x="440" y="1042" width="260" height="56" rx="6" fill="var(--filter-bg)" stroke="var(--filter-stroke)" stroke-width="1" stroke-dasharray="4,2"/>
+  <text x="570" y="1060" text-anchor="middle" fill="#8a6d20" font-size="11" font-weight="700">② 白名单过滤排除</text>
+  <text x="570" y="1078" text-anchor="middle" fill="#6b5a18" font-size="9">标书常见目录白名单匹配</text>
+  <text x="570" y="1093" text-anchor="middle" fill="#6b5a18" font-size="9">技术方案/商务条款/投标报价…</text>
+
+  <rect x="720" y="1042" width="280" height="56" rx="6" fill="var(--algo-bg)" filter="url(#sh)"/>
+  <text x="860" y="1060" text-anchor="middle" fill="var(--algo-tx)" font-size="11" font-weight="700">③ 大模型交叉验证</text>
+  <text x="860" y="1078" text-anchor="middle" fill="var(--algo-tx)" font-size="9" opacity="0.9">LLM 抽取全文目录结构</text>
+  <text x="860" y="1093" text-anchor="middle" fill="var(--algo-tx)" font-size="9" opacity="0.9">与 ①② 对比 → 筛选最优匹配</text>
+
+  <line x1="420" y1="1070" x2="436" y2="1070" stroke="var(--arrow)" stroke-width="1.2"/>
+  <line x1="700" y1="1070" x2="716" y2="1070" stroke="var(--arrow)" stroke-width="1.2"/>
+
+  <rect x="160" y="1108" width="840" height="34" rx="6" fill="#fff8e1" stroke="#e6d496" stroke-width="1"/>
+  <text x="580" y="1128" text-anchor="middle" fill="#8a6d20" font-size="10" font-weight="600">📋 输出: {"技术方案":{start:3,end:15}, "商务条款":{start:16,end:22}, …} — 仅保留三方验证通过的一级目录</text>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!--  ROW 5: 文本切分                                      -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="140" y="1200" width="230" height="58" rx="8" fill="var(--stage-bg)" filter="url(#sh)"/>
+  <text x="255" y="1220" text-anchor="middle" fill="var(--stage-tx)" font-size="13" font-weight="600">✂️ 重叠滑动窗口切分</text>
+  <text x="255" y="1238" text-anchor="middle" fill="var(--stage-tx)" font-size="10" opacity="0.9">chunk≈300字 · overlap=50 · 标点感知</text>
+  <text x="255" y="1253" text-anchor="middle" fill="var(--stage-tx)" font-size="9" opacity="0.75">每 chunk 携带 {章节名, 页码}</text>
+
+  <rect x="470" y="1200" width="200" height="58" rx="8" fill="var(--stage-bg)" filter="url(#sh)"/>
+  <text x="570" y="1220" text-anchor="middle" fill="var(--stage-tx)" font-size="13" font-weight="600">📦 缓存 chunks</text>
+  <text x="570" y="1238" text-anchor="middle" fill="var(--stage-tx)" font-size="10" opacity="0.9">file_id → List&lt;HDocument&gt;</text>
+  <text x="570" y="1253" text-anchor="middle" fill="var(--stage-tx)" font-size="9" opacity="0.75">含 chapter + page_num</text>
+
+  <line x1="370" y1="1229" x2="466" y2="1229" stroke="var(--arrow)" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Chunks → Comparison (dashed through center) -->
+  <line x1="570" y1="1260" x2="570" y2="1320" stroke="var(--dash)" stroke-width="1.2" stroke-dasharray="5,4"/>
+  <line x1="570" y1="1320" x2="530" y2="1320" stroke="var(--dash)" stroke-width="1.2" stroke-dasharray="5,4"/>
+  <line x1="530" y1="1320" x2="530" y2="1398" stroke="var(--dash)" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#ad)"/>
+  <line x1="570" y1="1320" x2="250" y2="1320" stroke="var(--dash)" stroke-width="1.2" stroke-dasharray="5,4"/>
+  <line x1="250" y1="1320" x2="250" y2="1398" stroke="var(--dash)" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#ad)"/>
+  <text x="410" y="1314" text-anchor="middle" fill="var(--muted)" font-size="10">任务内缓存 · 无需重复解析 · 按 chapter+page 定位</text>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!--  ROW 6: 文本比对                                      -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="140" y="1420" width="200" height="50" rx="8" fill="var(--stage-bg)" filter="url(#sh)"/>
+  <text x="240" y="1442" text-anchor="middle" fill="var(--stage-tx)" font-size="12" font-weight="600">📄 文档 A 片段</text>
+  <text x="240" y="1460" text-anchor="middle" fill="var(--stage-tx)" font-size="10" opacity="0.9">缓存 · chapter+page</text>
+
+  <rect x="440" y="1420" width="200" height="50" rx="8" fill="var(--stage-bg)" filter="url(#sh)"/>
+  <text x="540" y="1442" text-anchor="middle" fill="var(--stage-tx)" font-size="12" font-weight="600">📄 文档 B 片段</text>
+  <text x="540" y="1460" text-anchor="middle" fill="var(--stage-tx)" font-size="10" opacity="0.9">缓存 · chapter+page</text>
+
+  <!-- Arrows A,B → SequenceMatcher -->
+  <line x1="340" y1="1445" x2="348" y2="1445" stroke="var(--arrow)" stroke-width="1.5"/>
+  <line x1="640" y1="1445" x2="648" y2="1445" stroke="var(--arrow)" stroke-width="1.5"/>
+
+  <rect x="660" y="1405" width="360" height="80" rx="8" fill="var(--algo-bg)" filter="url(#sh)"/>
+  <text x="840" y="1428" text-anchor="middle" fill="var(--algo-tx)" font-size="13" font-weight="600">⚙ 逐对字符级比对</text>
+  <text x="840" y="1448" text-anchor="middle" fill="var(--algo-tx)" font-size="10" opacity="0.9">difflib.SequenceMatcher</text>
+  <text x="840" y="1465" text-anchor="middle" fill="var(--algo-tx)" font-size="10" opacity="0.9">ratio=2M/T · 文档互查 C(n,2) · 跳过<10字</text>
+  <text x="840" y="1480" text-anchor="middle" fill="var(--algo-tx)" font-size="9" opacity="0.7">每子任务独立执行 · 15 子任务可并发</text>
+
+  <!-- Threshold -->
+  <polygon points="840,1518 892,1540 840,1562 788,1540" fill="var(--branch-bg)" filter="url(#sh)"/>
+  <text x="840" y="1537" text-anchor="middle" fill="var(--branch-tx)" font-size="11" font-weight="600">重复率 ≥ 60%?</text>
+  <line x1="840" y1="1487" x2="840" y2="1516" stroke="var(--arrow)" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Branch arrows: clean orthogonal routing -->
+  <!-- "否" → left to miss box -->
+  <line x1="788" y1="1540" x2="700" y2="1540" stroke="var(--arrow)" stroke-width="1.5"/>
+  <line x1="700" y1="1540" x2="700" y2="1598" stroke="var(--arrow)" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="744" y="1532" text-anchor="middle" fill="var(--muted)" font-size="11">否</text>
+
+  <!-- "是" → right then down to hit box -->
+  <line x1="892" y1="1540" x2="340" y2="1540" stroke="var(--arrow)" stroke-width="1.5"/>
+  <line x1="340" y1="1540" x2="340" y2="1598" stroke="var(--arrow)" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="880" y="1532" text-anchor="middle" fill="var(--muted)" font-size="11">是</text>
+
+  <rect x="180" y="1600" width="240" height="46" rx="6" fill="var(--stage-bg)" filter="url(#sh)"/>
+  <text x="300" y="1620" text-anchor="middle" fill="var(--stage-tx)" font-size="12" font-weight="600">✅ 命中 — 记录相似对</text>
+  <text x="300" y="1638" text-anchor="middle" fill="var(--stage-tx)" font-size="10" opacity="0.9">A[技术方案·P12]↔B[技术方案·P8] 78%</text>
+
+  <rect x="580" y="1600" width="160" height="46" rx="6" fill="#e1e0d9" filter="url(#sh)"/>
+  <text x="660" y="1627" text-anchor="middle" fill="#52514e" font-size="12" font-weight="600">⬜ 未命中 · 跳过</text>
+
+  <!-- Aggregate -->
+  <rect x="200" y="1680" width="600" height="50" rx="8" fill="var(--stage-bg)" filter="url(#sh)"/>
+  <text x="500" y="1702" text-anchor="middle" fill="var(--stage-tx)" font-size="14" font-weight="600">📊 结果汇总 → 写入 DocumentSimilarityRecord</text>
+  <text x="500" y="1720" text-anchor="middle" fill="var(--stage-tx)" font-size="10" opacity="0.9">更新子任务 similarity_number · 所有子任务完成 → 父任务 completed</text>
+
+  <line x1="300" y1="1648" x2="300" y2="1662" stroke="var(--arrow)" stroke-width="1.5"/>
+  <line x1="660" y1="1648" x2="660" y2="1662" stroke="var(--arrow)" stroke-width="1.5"/>
+  <line x1="300" y1="1662" x2="660" y2="1662" stroke="var(--arrow)" stroke-width="1.5"/>
+  <line x1="480" y1="1662" x2="480" y2="1676" stroke="var(--arrow)" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Done -->
+  <rect x="310" y="1760" width="380" height="46" rx="8" fill="var(--stage-bg)" filter="url(#sh)"/>
+  <text x="500" y="1780" text-anchor="middle" fill="var(--stage-tx)" font-size="14" font-weight="600">📤 返回结果</text>
+  <text x="500" y="1798" text-anchor="middle" fill="var(--stage-tx)" font-size="10" opacity="0.9">子任务→完成 · 父任务检查→所有完成则更新 · 结果持久化</text>
+
+  <line x1="480" y1="1732" x2="480" y2="1756" stroke="var(--arrow)" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- MySQL feedback (right edge, clean) -->
+  <line x1="690" y1="1783" x2="775" y2="1783" stroke="var(--dash)" stroke-width="1.2" stroke-dasharray="5,4"/>
+  <line x1="775" y1="1783" x2="775" y2="84" stroke="var(--dash)" stroke-width="1" stroke-dasharray="5,4"/>
+  <text x="742" y="1775" text-anchor="middle" fill="var(--muted)" font-size="10">写入</text>
+
+  <!-- ═══ THROUGHPUT ═══ -->
+  <rect x="140" y="1850" width="760" height="56" rx="8" fill="var(--filter-bg)" stroke="var(--filter-stroke)" stroke-width="1.2" stroke-dasharray="6,3"/>
+  <text x="520" y="1872" text-anchor="middle" fill="#8a6d20" font-size="11" font-weight="700">📊 吞吐量: 5任务×3文件(15文件,15子任务) · 任务内复用解析15次(非30) · 渲染15000页≈5分 · MinerU×2≈74分 · 比对≈3分 · 总计≈82分</text>
+  <text x="520" y="1894" text-anchor="middle" fill="#8a6d20" font-size="10">瓶颈在 MinerU(仅2台) · 扩容到4台 → OCR≈37分 → 总计≈45分</text>
+
+</svg>
+</div>
+
+<div class="legend">
+  <span><i class="s"></i> 处理阶段</span>
+  <span><i class="db"></i> 存储/缓存</span>
+  <span><i class="cc"></i> 并发管线</span>
+  <span><i class="st"></i> 结构恢复</span>
+  <span><i class="ag"></i> 比对算法</span>
+  <span><i class="br"></i> 判断分支</span>
+</div>
+<footer>标书检测应用 · 纯扫描件 · 章节+页码级定位 · asyncio+ThreadPoolExecutor · 2026</footer>
+</div>
+</body>
+</html>

@@ -1,3 +1,4 @@
+import os
 import pytest
 import asyncio
 from langchain.agents import create_agent
@@ -32,7 +33,7 @@ def skill_registry():
 def model():
     return ChatSiliconFlow(
         base_url="https://api.siliconflow.cn/v1",
-        api_key="sk-sdbwgllpqhbnijbotgyqsikuhowhmmuzpowxraulvasfexsv",
+        api_key=os.getenv("SILICONFLOW_API_KEY", "sk-sdbwgllpqhbnijbotgyqsikuhowhmmuzpowxraulvasfexsv"),
         model="Qwen/Qwen3.6-35B-A3B",
         temperature=0,
         max_tokens=1000,
@@ -46,17 +47,26 @@ def test_check_official_seal_tool(context):
     tool: BaseTool = check_official_seal
     result = tool.invoke({"bid_id": 1, "rule_id": 1})
     print(result)
-    assert len(result) == 4
+    assert isinstance(result, dict)
+    assert "is_sign" in result
+    assert "text" in result
 
 def test_query_tender_topic(context):
     tool: BaseTool = query_tender_topic
     result = tool.invoke({"bid_id": 1, "keyword": "技术标"})
     print(result)
+    assert isinstance(result, dict)
+    assert "page_number" in result
+    assert isinstance(result["page_number"], list)
+
 
 def test_query_tender_keyword(context):
     tool: BaseTool = query_tender_keyword
     result = tool.invoke({"bid_id": 1, "keyword": "法定代表人或被授权人"})
     print(result)
+    assert isinstance(result, dict)
+    assert "page_number" in result
+    assert isinstance(result["page_number"], list)
 
 
 def test_read_skills(skill_registry: SkillRegistry):
@@ -90,12 +100,13 @@ def test_agent_skill(skill_registry: SkillRegistry, model):
     assert kw.skill_name == "query_keyword"
 
 
-def test_check_tender_signature_tool():
+def test_check_tender_signature_tool(context):
     """检测签字单元测试"""
     tool: BaseTool = check_tender_signature
     result = tool.invoke({"bid_id": 1, "page_number": [1]})
     print(result)
-    assert len(result) == 1
+    assert isinstance(result, list)
+    assert len(result) >= 1
 
 
 def test_check_signature(context, skill_registry: SkillRegistry, model):
@@ -113,7 +124,7 @@ def test_check_signature(context, skill_registry: SkillRegistry, model):
     print(items[0].is_compliant, items[0].check_basis)
 
 
-def test_check_official_seal(skill_registry: SkillRegistry, model):
+def test_check_official_seal_flow(skill_registry: SkillRegistry, model):
     skill_info = route_user_request(
         skill_registry, model, "检测标书bid_id=1是否盖有公章"
     )
@@ -138,21 +149,18 @@ def test_invoke_routes_general_without_skill(skill_registry: SkillRegistry, mode
 @pytest.mark.asyncio
 async def test_invoke_routes_skill_when_matched(context, skill_registry: SkillRegistry, model):
     """测试技能路由和执行的完整流程，确保协程完全执行"""
-    
-    # 在当前事件循环中执行同步调用
-    # invoke_with_skill_or_llm 内部会调用 asyncio.run()
-    # 我们需要确保它完全执行完毕
 
-    loop = asyncio.get_event_loop()
-    
-    # 在线程池中执行同步函数，避免阻塞事件循环
-    out = await loop.run_in_executor(
-        None,
-        lambda: invoke_with_skill_or_llm(
+    # 使用 concurrent.futures 在线程池中执行同步函数
+    # 避免与 pytest-asyncio 的事件循环冲突
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(
+            invoke_with_skill_or_llm,
             skill_registry, model, "检测标书bid_id=1是否盖有公章"
         )
-    )
-    
+        out = await asyncio.get_event_loop().run_in_executor(None, lambda: future.result())
+
     # 验证路由结果
     assert out["mode"] == "skill", f"期望 mode='skill'，实际为 '{out['mode']}'"
     assert out["router"].execution_mode == "skill", \

@@ -1,4 +1,4 @@
-import asyncio
+import concurrent.futures
 from io import BytesIO
 from itertools import combinations
 from typing import List
@@ -14,6 +14,7 @@ from apps.algorithms.embedding import QwenEmbeddingVectorizer
 from apps.document_parser.base import HDocument
 from apps.document_parser.markdown_parser import MarkDownParser
 from apps.document_parser.pdf_parser import PdfParser
+from apps.document_parser.doc_parser import DocParser
 from apps.repository.entity.file_entity import FileRecordEntity
 from apps.repository.entity.tender_entity import BidPlagiarismCheckTask, SubBidPlagiarismCheckTask, \
     DocumentSimilarityRecord, SubComplianceCheckTask, TenderComplianceRiskRecord, TenderTopic, TenderPDFImageEntity, \
@@ -22,9 +23,10 @@ from apps.repository.minio_repository import get_file_url, delete_object
 from apps.service.milnus_service import create_tender_vector_milvus_db, create_tender_reference_vector_milvus_db, \
     create_tender_topic_vector_milvus_db, create_rm_text_vector_milvus_db, create_main_topic_vector_milvus_db
 from apps.service.tender_compliance_service import create_compliance_check_task_record, run_compliance_checks_task, \
-    parser_tender_topic, parser_document, insert_into_milvus
+    parser_tender_topic, parser_document, insert_into_milvus, parser_tender_topic_from_documents
 from apps.web.dto.tender_task import TenderTaskDto, TenderConditionDto, BasePageDto, TenderSimilarityDto
 from apps.web.vo.similarity_respose import TenderTaskPage, format_datetime, TenderSimilarityVO, FileRecordVO, TaskDataVO
+from config import tender_check_config
 
 from logger_config import get_logger, setup_logging
 
@@ -32,6 +34,10 @@ setup_logging()
 logger = get_logger(name=__name__)
 
 app_context = AppContext()
+
+# 后台流水线专用线程池，与主事件循环的默认 ThreadPoolExecutor 隔离，
+# 避免长时间运行的查重/合规任务占用 asyncio.to_thread() 的共享线程。
+PIPELINE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 
 
 class TenderFile:
@@ -93,7 +99,7 @@ def start_plagiarism_check(tender_file_list, tender_reference_id):
     """
     tasks: List = list(combinations(tender_file_list, 2))
     if tender_reference_id:
-        asyncio.run(handle_tender_tender_reference_file(tender_reference_id))
+        handle_tender_tender_reference_file(tender_reference_id)
     for task in tasks:
         plagiarism_check_tasks(task, tender_reference_id)
 
@@ -110,7 +116,10 @@ def plagiarism_check_tasks(task, tender_reference_id = None):
 def bid_plagiarism_check(tender_task_dto: TenderTaskDto, background_tasks: BackgroundTasks):
     """
     标书查重/合规：仅注册一条后台流水线，各阶段按顺序执行，阶段内部可并发。
+    使用独立线程池 PIPELINE_EXECUTOR，避免阻塞主事件循环的默认线程池。
     """
+    import asyncio
+
     task_id = None
     tender_file_list = None
     if tender_task_dto.check_type == 1:
@@ -120,7 +129,9 @@ def bid_plagiarism_check(tender_task_dto: TenderTaskDto, background_tasks: Backg
     else:
         return
 
-    background_tasks.add_task(
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(
+        PIPELINE_EXECUTOR,
         run_tender_check_pipeline,
         tender_task_dto,
         task_id,
@@ -147,7 +158,7 @@ def run_tender_check_pipeline(
         start_plagiarism_check(tender_file_list, tender_task_dto.tender_reference_id)
     elif tender_task_dto.check_type == 2:
         logger.info("流水线: 合规检测 task_id=%s", task_id)
-        asyncio.run(run_compliance_checks_task(tender_task_dto.file_ids, task_id))
+        run_compliance_checks_task(tender_task_dto.file_ids, task_id)
 
     logger.info("流水线: 更新任务状态 task_id=%s", task_id)
     update_task_process_status(task_id)
@@ -155,25 +166,64 @@ def run_tender_check_pipeline(
 
 
 def run_tender_file_parser_background(tender_file_ids: List[int]) -> None:
-    """在 BackgroundTasks 线程池中运行，使用独立事件循环执行解析协程。"""
-    asyncio.run(tender_file_parser_task(tender_file_ids))
+    """在后台线程中直接执行解析任务。"""
+    tender_file_parser_task(tender_file_ids)
 
 
-async def tender_file_parser_task(tender_file_ids: List[int]):
-    """并发解析标书并入库；阻塞 I/O/CPU 通过 to_thread 移出事件循环。"""
-    max_concurrency = 3
-    semaphore = asyncio.Semaphore(max_concurrency)
+def tender_file_parser_task(tender_file_ids: List[int]):
+    """并发解析标书并入库；使用线程池并发处理。"""
 
-    async def process_single(file_id: int):
-        async with semaphore:
-            logger.info("开始解析 file_id=%s", file_id)
+    def process_single(file_id: int):
+        logger.info("开始解析 file_id=%s", file_id)
+
+        with app_context.db_session_factory() as session:
+            file_record = session.get(FileRecordEntity, file_id)
+            if not file_record:
+                logger.error(f"文件记录不存在: file_id={file_id}")
+                return
+
+            mime_type = file_record.mime_type.lower()
+            is_word_format = mime_type in [
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/msword",
+                "docx",
+                "doc"
+            ]
+
+        if is_word_format:
+            logger.info(f"检测到Word格式文件，使用DocParser解析 file_id={file_id}")
+            doc_parser = DocParser()
+
+            with app_context.db_session_factory() as session:
+                file_record = session.get(FileRecordEntity, file_id)
+                minio_client = app_context.minio_client
+                with minio_client.get_object(file_record.business_id, file_record.file_path) as response:
+                    file_data = response.read()
+
+            word_stream = BytesIO(file_data)
+            documents = doc_parser.parse(None, word_stream, file_id)
+
+            if not documents:
+                logger.error(f"Word文档解析失败 file_id={file_id}")
+                return
+
+            topics = parser_tender_topic_from_documents(documents, file_id)
+            insert_into_milvus(file_id, topics, documents)
+        else:
+            logger.info(f"检测到PDF格式文件，使用原有流程解析 file_id={file_id}")
             md_parser = MarkDownParser()
-            await md_parser.to_images(tender_file_id=file_id)
-            documents = await asyncio.to_thread(parser_document, file_id)
-            topics = await parser_tender_topic(file_id)
-            await asyncio.to_thread(insert_into_milvus, file_id, topics, documents)
+            md_parser.to_images(tender_file_id=file_id)
+            topics = parser_tender_topic(file_id)
+            documents = parser_document(file_id)
+            insert_into_milvus(file_id, topics, documents)
 
-    await asyncio.gather(*(process_single(fid) for fid in tender_file_ids))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(process_single, fid) for fid in tender_file_ids]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"文件解析失败: {str(e)}")
 
 
 def update_task_process_status(task_id):
@@ -913,7 +963,7 @@ def delete_tender_task_by_task_id(task_id: int):
 #             session.commit()
 
 
-async def handle_tender_tender_reference_file(file_id: int):
+def handle_tender_tender_reference_file(file_id: int):
     """
     处理标书招标文件
     :param file_id: 上传招标文件的id
@@ -1026,6 +1076,17 @@ class CheckTask:
                 return False
         return True
 
+    @staticmethod
+    def _calc_text_overlap(text_a: str, text_b: str) -> float:
+        """计算字符级重合度：text_a 中有多大比例的字符出现在 text_b 中。"""
+        if not text_a or not text_b:
+            return 0.0
+        chars_a = set(text_a.replace(' ', '').replace('\n', ''))
+        chars_b = set(text_b.replace(' ', '').replace('\n', ''))
+        if not chars_a:
+            return 0.0
+        return len(chars_a & chars_b) / len(chars_a)
+
     def execute(self):
         """
         执行比对任务
@@ -1085,9 +1146,19 @@ class CheckTask:
                 if not self.rm_text(tender_item, milvus_reference_vector_db, rm_text_vector_milvus_db):
                     continue
                 result = milvus_vector_db.search_similar(f"file_id == {self.file_record_b.file_id} and topic == '{topic_content_similarity}'", [tender_item["vector"]])
+                text_overlap_threshold = tender_check_config.get("text_overlap_threshold", 0.3)
+                vector_similarity_threshold = tender_check_config.get("vector_similarity_threshold", 0.85)
                 for info in result:
-                    if info['similarity'] > 0.85:
-
+                    text_overlap = self._calc_text_overlap(tender_item['text_content'], info['text_content'])
+                    if text_overlap >= text_overlap_threshold:
+                        is_duplicate = True
+                        match_similarity = text_overlap
+                    elif info['similarity'] > vector_similarity_threshold:
+                        is_duplicate = True
+                        match_similarity = info['similarity']
+                    else:
+                        is_duplicate = False
+                    if is_duplicate:
                         document_similarity_record = DocumentSimilarityRecord(
                             bid_plagiarism_check_task_id=self.file_record_b.tender_task_id,
                             sub_bid_plagiarism_check_task_id=sub_id,
@@ -1103,7 +1174,7 @@ class CheckTask:
                             right_file_page=info['page'],
                             right_file_page_start_index=info['start_index'],
                             right_file_page_chunk=info['text_content'],
-                            similarity=info['similarity']
+                            similarity=match_similarity
                         )
                         document_similarity_records.append(document_similarity_record)
         with app_context.db_session_factory() as session:

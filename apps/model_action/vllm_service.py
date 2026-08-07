@@ -115,7 +115,7 @@ class PromptTemplate:
         return template_mes
 
 
-async def handle_rule(rule: TenderRuleConfiguration,
+def handle_rule(rule: TenderRuleConfiguration,
                       tender_file_id,
                       sub_compliance_check_task_id: int,
                       bid_plagiarism_check_task_id: int):

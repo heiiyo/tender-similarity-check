@@ -4,6 +4,7 @@ import uvicorn
 from fastapi import FastAPI
 from pathlib import Path
 from starlette.middleware.cors import CORSMiddleware
+from starlette.staticfiles import StaticFiles
 
 from apps import AppContext
 from logger_config import get_logger, setup_logging
@@ -24,6 +25,12 @@ app = FastAPI(
     lifespan=start_app
 )
 
+app.mount(
+    path="/document",  # 网络链接前缀：http://localhost:8000/document/xxx
+    app=StaticFiles(directory="documents"),  # 本地静态文件目录：项目根目录下的 document
+    name="document"
+)
+
 # 配置 CORS 中间件
 app.add_middleware(
     CORSMiddleware,
@@ -31,6 +38,7 @@ app.add_middleware(
     allow_credentials=True,  # 允许携带凭证（如 Cookie）
     allow_methods=["*"],  # 允许所有 HTTP 方法（GET, POST, PUT 等）
     allow_headers=["*"],  # 允许所有请求头
+    expose_headers=["Content-Disposition"]
 )
 
 # 注册子路由（自动带全局前缀）
@@ -42,7 +50,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",      # 模块:实例
         host="0.0.0.0",
-        port=8000,
+        port=8088,
         reload=True,         # 开发时开启自动重载
         log_level="info"
     )

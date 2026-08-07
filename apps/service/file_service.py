@@ -8,7 +8,9 @@ import uuid
 import zipfile
 from concurrent.futures.thread import ThreadPoolExecutor
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Dict, Any
+
+from pydantic import BaseModel, Field
 
 from apps import AppContext
 from apps.repository.entity.file_entity import FileRecordEntity
@@ -21,13 +23,186 @@ logger = get_logger(name=__package__)
 
 app_context = AppContext()
 minio_client = app_context.minio_client
-# 创建一个全局线程池（避免每次调用都创建新线程）
 _executor = ThreadPoolExecutor(max_workers=20)
 
 
-async def task_upload(file_bytes, file_type, business_id, page_number, tender_file_id):
+class TenderInfo(BaseModel):
+    """投标信息数据模型"""
+    project_name: Optional[str] = Field(None, description="项目名称")
+    bid_date: Optional[str] = Field(None, description="投标时间/开标时间")
+    bidder: Optional[str] = Field(None, description="投标人/投标单位")
+    tenderer: Optional[str] = Field(None, description="招标人/招标单位")
+    legal_representative: Optional[str] = Field(None, description="法定代表人或委托代理人")
+
+
+def extract_tender_info_from_first_page(file_path: str, mime_type: str) -> Optional[TenderInfo]:
+    """
+    从文件第一页提取完整的投标信息
+    :param file_path: 文件路径
+    :param mime_type: 文件类型 (pdf, docx, doc等)
+    :return: TenderInfo对象，包含项目名称、投标时间、投标人、招标人、法定代表人等信息，失败返回None
+    """
+    try:
+        if mime_type.lower() in ['pdf']:
+            return _extract_tender_info_from_pdf(file_path)
+        elif mime_type.lower() in ['docx', 'doc']:
+            return _extract_tender_info_from_docx(file_path)
+        else:
+            logger.warning(f"不支持的文件类型: {mime_type}")
+            return None
+    except Exception as e:
+        logger.error(f"提取投标信息失败: {str(e)}", exc_info=True)
+        return None
+
+
+def _extract_tender_info_from_pdf(file_path: str) -> Optional[TenderInfo]:
+    """
+    从PDF文件第一页提取投标信息（统一使用OCR直接提取结构化信息）
+    策略：
+    1. 将PDF第一页转换为图片
+    2. 使用OCR模型直接识别并提取结构化投标信息
+    """
+    try:
+        logger.info("开始将PDF第一页转换为图片进行OCR识别")
+        image_bytes = pdf_page_to_image(file_path, page_number=0, dpi=300)
+        
+        logger.info("开始OCR识别并提取投标信息")
+        tender_info = ocr_extract_tender_info(image_bytes)
+
+        if not tender_info or (not any([tender_info.project_name, tender_info.bidder, tender_info.tenderer])):
+            logger.warning("OCR未能提取到有效的投标信息")
+            return None
+        
+        return tender_info
+
+    except Exception as e:
+        logger.error(f"PDF投标信息提取失败: {str(e)}", exc_info=True)
+        return None
+
+
+def _extract_tender_info_from_docx(file_path: str) -> Optional[TenderInfo]:
+    """
+    从Word文档第一页提取投标信息
+    策略：提取文本后使用LLM解析
+    """
+    try:
+        from docx import Document
+
+        doc = Document(file_path)
+        
+        first_page_text = ""
+        char_count = 0
+        
+        for paragraph in doc.paragraphs:
+            if paragraph.text and paragraph.text.strip():
+                text = paragraph.text.strip()
+                first_page_text += text + "\n"
+                char_count += len(text)
+                
+                if char_count > 2000:
+                    break
+
+        if not first_page_text or len(first_page_text.strip()) < 10:
+            logger.warning("Word文档第一页文本内容为空或过短")
+            return None
+
+        logger.info(f"从Word文档提取了 {len(first_page_text)} 字符，开始LLM解析")
+        return _parse_tender_info_with_llm(first_page_text)
+
+    except ImportError:
+        logger.error("未安装python-docx库，无法解析Word文档")
+        return None
+    except Exception as e:
+        logger.error(f"Word投标信息提取失败: {str(e)}", exc_info=True)
+        return None
+
+
+def _parse_tender_info_with_llm(text: str) -> Optional[TenderInfo]:
+    """
+    使用LLM从文本中解析投标信息
+    :param text: 待解析的文本内容
+    :return: TenderInfo对象，失败返回None
+    """
+    try:
+        from apps.model_action.llm import LLMModel
+        from apps.model_action.vllm_service import PromptTemplate, HumanMessage
+        import json
+
+        prompt = f"""你是一个专业的投标文件信息提取助手。请从以下OCR识别的投标文件首页内容中提取关键信息。
+
+需要提取的字段说明：
+1. project_name: 项目名称/标段名称（通常是页面中最醒目的标题，可能包含"项目"、"工程"、"采购"等关键词）
+2. bid_date: 投标截止时间或开标时间（查找"投标截止时间"、"开标时间"、"截止日期"等附近的日期，格式如：2024年1月15日 或 2024-01-15）
+3. bidder: 投标人/投标单位全称（查找"投标人"、"投标单位"、"供应商"等字段后的公司名称）
+4. tenderer: 招标人/采购单位全称（查找"招标人"、"采购人"、"建设单位"、"业主"等字段后的单位名称）
+5. legal_representative: 法定代表人或授权委托人姓名（查找"法定代表人"、"法人代表"、"授权代表"、"委托代理人"等字段后的姓名）
+
+重要提示：
+- 如果某个字段在文本中找不到明确对应的信息，请将该字段设为 null
+- 不要编造或推测不存在的信息
+- 保持原文的准确性，特别是公司名称和人名
+- 日期尽量转换为标准格式 YYYY-MM-DD
+
+OCR识别的文本内容：
+{text}
+
+请严格按照以下JSON格式返回（只返回JSON对象，不要添加任何其他说明、注释或代码标记）：
+{{
+  "project_name": "项目名称或null",
+  "bid_date": "YYYY-MM-DD格式的日期或null",
+  "bidder": "投标人全称或null",
+  "tenderer": "招标人全称或null",
+  "legal_representative": "法定代表人姓名或null"
+}}
+"""
+
+        llm_model = LLMModel(
+            model_name=app_context.llm_config.get("model_name", "Qwen/Qwen2.5-72B-Instruct"),
+            url=app_context.llm_config.get("url", "https://api.siliconflow.cn/v1/chat/completions"),
+            api_key=app_context.llm_config.get("api_key", "")
+        )
+
+        message = PromptTemplate([HumanMessage(prompt)])
+        result = asyncio.run(llm_model.invoke(message))
+
+        if result and "choices" in result and len(result["choices"]) > 0:
+            content = result["choices"][0]["message"]["content"]
+            
+            # 尝试提取JSON
+            match = re.search(r'\{.*\}', content, re.DOTALL)
+            if match:
+                json_str = match.group(0)
+                try:
+                    info_dict = json.loads(json_str)
+                    
+                    tender_info = TenderInfo(
+                        project_name=info_dict.get("project_name"),
+                        bid_date=info_dict.get("bid_date"),
+                        bidder=info_dict.get("bidder"),
+                        tenderer=info_dict.get("tenderer"),
+                        legal_representative=info_dict.get("legal_representative")
+                    )
+                    
+                    logger.info(f"成功提取投标信息: 项目={tender_info.project_name}, 投标人={tender_info.bidder}, 招标人={tender_info.tenderer}")
+                    return tender_info
+                except json.JSONDecodeError as je:
+                    logger.error(f"JSON解析失败: {str(je)}, 原始内容: {json_str[:200]}")
+                    return None
+            else:
+                logger.warning(f"未找到JSON格式的内容，LLM返回: {content[:200]}")
+                return None
+
+        logger.warning("LLM返回结果格式不正确或为空")
+        return None
+
+    except Exception as e:
+        logger.error(f"LLM解析投标信息失败: {str(e)}", exc_info=True)
+        return None
+
+
+def task_upload(file_bytes, file_type, business_id, page_number, tender_file_id):
     logger.info(f"task_upload 开始时间- {datetime.datetime.now()}")
-    file_id, url = await upload_file_bytes(file_bytes, file_type, business_id)
+    file_id, url = _blocking_upload_logic(file_bytes, file_type, business_id)
     logger.info(f"task_upload 结束时间- {datetime.datetime.now()}")
     with app_context.db_session_factory() as session:
         tender_pdf_image_entity = TenderPDFImageEntity(
@@ -490,9 +665,48 @@ def pdf_page_to_image(file_path: str, page_number: int = 0, dpi: int = 200) -> b
         raise
 
 
+def ocr_extract_tender_info(image_bytes: bytes) -> Optional[TenderInfo]:
+    """
+    使用OCR Agent直接从图片中提取投标信息（结构化返回）
+    :param image_bytes: 图片字节数据
+    :return: TenderInfo对象，包含项目名称、投标时间、投标人、招标人、法定代表人等信息，失败返回None
+    """
+    try:
+        from agent.model.orc import scan_orc_content_with_prompt
+
+        # 将图片转换为base64
+        base64_str = base64.b64encode(image_bytes).decode("utf-8")
+        
+        prompt_text = "请从这张投标文件首页图片中提取关键投标信息"
+        
+        # 调用OCR Agent，直接返回结构化的TenderInfo
+        result = scan_orc_content_with_prompt(
+            image_base64=base64_str,
+            prompt_text=prompt_text,
+            response_format=TenderInfo
+        )
+        logger.info(f"OCR Agent返回结构化结果: {result}")
+        # 从结果中提取TenderInfo
+        if result and "structured_response" in result:
+            tender_info = result["structured_response"]
+            if tender_info and any([tender_info.project_name, tender_info.bidder, tender_info.tenderer]):
+                logger.info(f"OCR Agent成功提取投标信息: 项目={tender_info.project_name}, 投标人={tender_info.bidder}")
+                return tender_info
+            else:
+                logger.warning("OCR Agent返回的TenderInfo中所有字段都为空")
+                return None
+        
+        logger.warning("OCR Agent未返回结构化结果")
+        return None
+
+    except Exception as e:
+        logger.error(f"OCR Agent提取投标信息失败: {str(e)}", exc_info=True)
+        return None
+
+
 def ocr_extract_text_from_image(image_bytes: bytes) -> str:
     """
-    使用OCR从图片中提取文本
+    使用OCR从图片中提取纯文本（保留原有功能供其他地方使用）
     :param image_bytes: 图片字节数据
     :return: 识别出的文本
     """
@@ -500,7 +714,12 @@ def ocr_extract_text_from_image(image_bytes: bytes) -> str:
         from agent.model.orc import scan_orc_content
 
         base64_str = base64.b64encode(image_bytes).decode("utf-8")
-        prompt_text = "请识别图片中的所有文字内容，保持原有格式。如果是标题或大字号文字，请特别标注。"
+        prompt_text = """请识别图片中的所有文字内容，保持原有格式和布局。
+        特别注意：
+        1. 准确识别标题、大字号文字
+        2. 保留表格结构
+        3. 识别日期、公司名称、人名等关键信息
+        4. 如果文字模糊不清，尽量根据上下文推断"""
 
         result = scan_orc_content(base64_str, prompt_text)
 
@@ -691,10 +910,10 @@ def _extract_project_name_from_docx(file_path: str) -> str:
 
 def upload_file_with_project_name(files, business_id) -> List[dict]:
     """
-    上传文件并提取项目名称
+    上传文件并提取投标信息（项目名称、投标时间、投标人、招标人、法定代表人等）
     :param files: 文件集合
     :param business_id: 业务id
-    :return: 包含文件ID和项目名称的列表
+    :return: 包含文件ID和投标信息的列表
     """
     result_list = []
 
@@ -728,12 +947,136 @@ def upload_file_with_project_name(files, business_id) -> List[dict]:
                 session.commit()
                 file_id = file_record.id
 
-            project_name = extract_project_name_from_first_page(file_path, file_type)
-
-            result_list.append({
-                "file_id": file_id,
-                "project_name": project_name
-            })
+            tender_info = extract_tender_info_from_first_page(file_path, file_type)
+            if tender_info:
+                result_list.append({
+                    "file_id": file_id,
+                    "project_name": tender_info.project_name if tender_info else None,
+                    "bid_date": tender_info.bid_date if tender_info else None,
+                    "bidder": tender_info.bidder if tender_info else None,
+                    "tenderer": tender_info.tenderer if tender_info else None,
+                    "legal_representative": tender_info.legal_representative if tender_info else None
+                })
 
     return result_list
+
+
+def delete_file_by_id(file_id: int) -> bool:
+    """
+    根据file_id删除文件及其关联的所有数据
+    
+    :param file_id: 文件ID
+    :return: 删除成功返回True，失败返回False
+    """
+    try:
+        logger.info(f"开始删除文件 ID: {file_id}")
+        
+        with app_context.db_session_factory() as session:
+            # 1. 查询文件记录
+            file_record = session.get(FileRecordEntity, file_id)
+            if not file_record:
+                logger.warning(f"文件记录不存在: file_id={file_id}")
+                return False
+            
+            file_path = file_record.file_path
+            business_id = file_record.business_id
+            
+            logger.info(f"找到文件记录: {file_record.file_name}, 路径: {file_path}")
+            
+            # 2. 删除 TenderPDFImageEntity 关联记录（如果存在）
+            tender_pdf_images = session.query(TenderPDFImageEntity).filter(
+                TenderPDFImageEntity.tender_file_id == file_id
+            ).all()
+            
+            if tender_pdf_images:
+                for image_entity in tender_pdf_images:
+                    session.delete(image_entity)
+                logger.info(f"删除了 {len(tender_pdf_images)} 条 TenderPDFImageEntity 记录")
+            
+            # 3. 检查是否有其他表引用此文件（如 SubBidPlagiarismCheckTask 等）
+            # 这里可以根据需要添加更多的检查
+            
+            # 4. 删除文件记录
+            session.delete(file_record)
+            logger.info(f"删除文件记录: file_id={file_id}")
+            
+            # 5. 提交数据库事务
+            session.commit()
+            logger.info("数据库记录删除完成")
+        
+        # 6. 删除 MinIO 中的文件
+        try:
+            minio_client.remove_object(
+                bucket_name=app_context.minio_config["bucket_name"],
+                object_name=file_path
+            )
+            logger.info(f"MinIO文件删除成功: {file_path}")
+        except Exception as e:
+            logger.error(f"MinIO文件删除失败: {file_path}, 错误: {str(e)}")
+            # MinIO删除失败不影响整体结果，因为数据库已删除
+        
+        logger.info(f"文件删除完成: file_id={file_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"删除文件失败: file_id={file_id}, 错误: {str(e)}", exc_info=True)
+        return False
+
+
+def batch_delete_files(file_ids: List[int]) -> dict:
+    """
+    批量删除文件及其关联的所有数据
+    
+    :param file_ids: 文件ID列表
+    :return: 包含删除结果的字典
+    """
+    if not file_ids:
+        logger.warning("批量删除文件列表为空")
+        return {
+            "total": 0,
+            "success_count": 0,
+            "failed_count": 0,
+            "success_ids": [],
+            "failed_details": []
+        }
+    
+    logger.info(f"开始批量删除 {len(file_ids)} 个文件")
+    
+    success_count = 0
+    failed_count = 0
+    success_ids = []
+    failed_details = []
+    
+    for file_id in file_ids:
+        try:
+            success = delete_file_by_id(file_id)
+            if success:
+                success_count += 1
+                success_ids.append(file_id)
+                logger.info(f"文件 {file_id} 删除成功")
+            else:
+                failed_count += 1
+                failed_details.append({
+                    "file_id": file_id,
+                    "error": "文件不存在或删除失败"
+                })
+                logger.warning(f"文件 {file_id} 删除失败")
+        except Exception as e:
+            failed_count += 1
+            failed_details.append({
+                "file_id": file_id,
+                "error": str(e)
+            })
+            logger.error(f"文件 {file_id} 删除异常: {str(e)}")
+    
+    result = {
+        "total": len(file_ids),
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "success_ids": success_ids,
+        "failed_details": failed_details
+    }
+    
+    logger.info(f"批量删除完成: 总数={len(file_ids)}, 成功={success_count}, 失败={failed_count}")
+    return result
 
